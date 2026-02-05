@@ -1,6 +1,6 @@
-# Red5 Pro Conference SDK
+# Red5 Conference SDK
 
-The Red5 Pro Conference SDK is a powerful, professional-grade toolkit for building multi-party video conferencing applications on the Red5 Pro platform. It handles room management, media streaming (WHIP/WHEP), WebRTC statistics, and advanced features like virtual backgrounds and local recording.
+The Red5 Conference SDK is a powerful, professional-grade toolkit for building multi-party video conferencing applications on the Red5 platform. It handles room management, media streaming (WHIP/WHEP), WebRTC statistics, and advanced features like virtual backgrounds and local recording.
 
 ## Table of Contents
 
@@ -75,7 +75,7 @@ The `ConferenceConfig` object supports the following parameters:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `host` | `string` | Red5 Pro Server host address. |
+| `host` | `string` | Red5 Server host address. |
 | `nodeGroup` | `string` | Optional node group for autoscaling. |
 | `iceServers` | `RTCIceServer[]` | Array of ICE servers for WebRTC. |
 | `reconnectionEnabled` | `boolean` | Enable automatic reconnection. Default: `true`. |
