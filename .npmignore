@@ -1,0 +1,19 @@
+# OSX
+.DS_Store
+
+# Build files
+.vscode
+rollup.config.js
+tsconfig.json
+
+# Tests
+__tests__
+.env.test
+jest.config.js
+jest.setup.js
+
+# artifacts
+node_modules
+examples
+build
+src

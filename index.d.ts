@@ -949,5 +949,7 @@ declare const VirtualBackgroundTypes: {
     COLOR: string;
 };
 
-export { ChatEventTypes, ConferenceClient, ConferenceEvents, LayoutOptions, VirtualBackgroundTypes };
+declare const version: string;
+
+export { ChatEventTypes, ConferenceClient, ConferenceEvents, LayoutOptions, VirtualBackgroundTypes, version };
 export type { AudioInboundStats, AudioOutboundStats, CandidatePair, CodecInfo, ConferenceConfig, ConnectionAnalysis, ConnectionQuality, ConnectionStats, DetailedConnectionStats, FileType, Issue, IssueReason, IssueSeverity, IssueType, MonitorConfig, MonitorOptions, MonitorThresholds, NetworkQualitySummary, ParsedStats, QualityLevel, StatsAnalysis, TransportStats, User, VideoInboundStats, VideoOutboundStats };
