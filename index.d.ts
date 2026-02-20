@@ -331,8 +331,9 @@ declare class MediaStreamManager {
     virtualBackgroundProcessor: VirtualBackgroundProcessor;
     private isVirtualBackgroundEnabled;
     private processedStream;
+    private pendingStreamPromise;
     private readonly defaultConstraints;
-    constructor();
+    constructor(enableNoiseCancellation?: boolean);
     /**
      * Initialize virtual background processor
      */
@@ -419,6 +420,7 @@ interface ConferenceConfig {
     pubnubPublishKey?: string;
     pubnubSubscribeKey?: string;
     analyticsEndpoint?: string | null | undefined;
+    enableNoiseCancellation?: boolean;
 }
 interface User {
     uid: string;
@@ -573,7 +575,7 @@ declare class ConferenceClient extends EventTarget {
     /**
      * Get virtual background status
      */
-    getVirtualBackgroundStatus(): any;
+    getVirtualBackgroundStatus(): VirtualBackgroundStatus;
     refreshPublisherStream(mediaStream: MediaStream): Promise<void>;
     refreshScreenShareStream(mediaStream: MediaStream): Promise<void>;
     /**
@@ -815,14 +817,14 @@ declare class ConferenceClient extends EventTarget {
     _sendJoinMessage(): void;
     /**
      * Mute audio on the publisher
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    muteAudio(): void;
+    muteAudio(): Promise<void>;
     /**
      * Unmute audio on the publisher
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    unmuteAudio(): void;
+    unmuteAudio(): Promise<void>;
     muteVideo(): Promise<void>;
     /**
      * Unmute video by getting new camera stream and re-applying virtual background if needed
@@ -952,4 +954,4 @@ declare const VirtualBackgroundTypes: {
 declare const version: string;
 
 export { ChatEventTypes, ConferenceClient, ConferenceEvents, LayoutOptions, VirtualBackgroundTypes, version };
-export type { AudioInboundStats, AudioOutboundStats, CandidatePair, CodecInfo, ConferenceConfig, ConnectionAnalysis, ConnectionQuality, ConnectionStats, DetailedConnectionStats, FileType, Issue, IssueReason, IssueSeverity, IssueType, MonitorConfig, MonitorOptions, MonitorThresholds, NetworkQualitySummary, ParsedStats, QualityLevel, StatsAnalysis, TransportStats, User, VideoInboundStats, VideoOutboundStats };
+export type { AudioInboundStats, AudioOutboundStats, CandidatePair, CodecInfo, ConferenceConfig, ConnectionAnalysis, ConnectionQuality, ConnectionStats, DetailedConnectionStats, FileType, Issue, IssueReason, IssueSeverity, IssueType, MonitorConfig, MonitorOptions, MonitorThresholds, NetworkQualitySummary, ParsedStats, QualityLevel, StatsAnalysis, TransportStats, User, VideoInboundStats, VideoOutboundStats, VirtualBackgroundStatus };
