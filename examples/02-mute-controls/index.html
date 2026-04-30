@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>02 – Mute Controls | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 480px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join  { background: #238636; color: #fff; }
+    #btn-leave { background: #da3633; color: #fff; }
+    .mute-btn  { background: #1f6feb; color: #fff; min-width: 130px; }
+    .mute-btn.muted { background: #6e40c9; }
+
+    video { width: 320px; height: 180px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; margin-bottom: 16px; }
+
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
+    .badge.on  { background: #0f3d24; color: #3fb950; }
+    .badge.off { background: #3d0f0f; color: #f85149; }
+
+    #log { margin-top: 24px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 160px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+  </style>
+</head>
+<body>
+  <h1>02 – Mute Controls</h1>
+  <p class="subtitle">Join a room and toggle audio / video mute during an active session.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token (optional)</label><input id="token" /></div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <video id="local-video" autoplay playsinline muted></video>
+
+  <div class="row">
+    <button class="mute-btn" id="btn-audio" disabled>Mute Audio</button>
+    <span class="badge on" id="badge-audio">&#x1F3A4; Audio ON</span>
+
+    <button class="mute-btn" id="btn-video" disabled>Mute Video</button>
+    <span class="badge on" id="badge-video">&#x1F4F9; Video ON</span>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client = null;
+    let localStream = null;
+    let audioMuted = false;
+    let videoMuted = false;
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    function syncAudioBadge() {
+      const badge = $('badge-audio');
+      const btn   = $('btn-audio');
+      if (audioMuted) {
+        badge.className = 'badge off';
+        badge.textContent = '🔇 Audio OFF';
+        btn.textContent = 'Unmute Audio';
+        btn.classList.add('muted');
+      } else {
+        badge.className = 'badge on';
+        badge.textContent = '🎤 Audio ON';
+        btn.textContent = 'Mute Audio';
+        btn.classList.remove('muted');
+      }
+    }
+
+    function syncVideoBadge() {
+      const badge = $('badge-video');
+      const btn   = $('btn-video');
+      if (videoMuted) {
+        badge.className = 'badge off';
+        badge.textContent = '📷 Video OFF';
+        btn.textContent = 'Unmute Video';
+        btn.classList.add('muted');
+      } else {
+        badge.className = 'badge on';
+        badge.textContent = '📹 Video ON';
+        btn.textContent = 'Mute Video';
+        btn.classList.remove('muted');
+      }
+    }
+
+    $('btn-join').addEventListener('click', async () => {
+      const host   = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        $('local-video').srcObject = localStream;
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+          log('Publishing — mute controls are now active', 'success');
+          $('btn-join').disabled  = true;
+          $('btn-leave').disabled = false;
+          $('btn-audio').disabled = false;
+          $('btn-video').disabled = false;
+        });
+
+        client.addEventListener(ConferenceEvents.AUDIO_MUTED,   () => { audioMuted = true;  syncAudioBadge(); log('Audio muted'); });
+        client.addEventListener(ConferenceEvents.AUDIO_UNMUTED, () => { audioMuted = false; syncAudioBadge(); log('Audio unmuted'); });
+        client.addEventListener(ConferenceEvents.VIDEO_MUTED,   () => { videoMuted = true;  syncVideoBadge(); log('Video muted'); });
+        client.addEventListener(ConferenceEvents.VIDEO_UNMUTED, () => { videoMuted = false; syncVideoBadge(); log('Video unmuted'); });
+        client.addEventListener(ConferenceEvents.AUDIO_MUTE_FAILED,   e => log(`Audio mute failed: ${e.detail?.message}`, 'error'));
+        client.addEventListener(ConferenceEvents.VIDEO_MUTE_FAILED,   e => log(`Video mute failed: ${e.detail?.message}`, 'error'));
+
+        log('Joining room…');
+        await client.join(roomId, userId, token, 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-audio').addEventListener('click', async () => {
+      if (!client) return;
+      try {
+        if (audioMuted) await client.unmuteAudio();
+        else            await client.muteAudio();
+      } catch (err) {
+        log(`Audio toggle error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-video').addEventListener('click', async () => {
+      if (!client) return;
+      try {
+        if (videoMuted) await client.unmuteVideo();
+        else            await client.muteVideo();
+      } catch (err) {
+        log(`Video toggle error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('local-video').srcObject = null;
+        client = null; localStream = null;
+        audioMuted = false; videoMuted = false;
+        syncAudioBadge(); syncVideoBadge();
+        $('btn-join').disabled  = false;
+        $('btn-leave').disabled = true;
+        $('btn-audio').disabled = true;
+        $('btn-video').disabled = true;
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>

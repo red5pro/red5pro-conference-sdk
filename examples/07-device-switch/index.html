@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>07 – Device Switch | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 480px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input, select { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join  { background: #238636; color: #fff; }
+    #btn-leave { background: #da3633; color: #fff; }
+    .apply-btn { background: #1f6feb; color: #fff; }
+
+    video { width: 320px; height: 180px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; margin-bottom: 20px; }
+
+    #device-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; max-width: 480px; margin-bottom: 20px; }
+    #device-panel h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 14px; }
+    .device-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .device-row label { min-width: 80px; margin-bottom: 0; }
+    .device-row select { flex: 1; }
+
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+  </style>
+</head>
+<body>
+  <h1>07 – Device Switch</h1>
+  <p class="subtitle">Switch between available cameras and microphones mid-session without reconnecting.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token (optional)</label><input id="token" /></div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <video id="local-video" autoplay playsinline muted></video>
+
+  <div id="device-panel">
+    <h3>Switch Devices</h3>
+    <div class="device-row">
+      <label>Camera</label>
+      <select id="sel-camera" disabled><option>— enumerate after join —</option></select>
+      <button class="apply-btn" id="btn-camera" disabled>Switch</button>
+    </div>
+    <div class="device-row">
+      <label>Microphone</label>
+      <select id="sel-mic" disabled><option>— enumerate after join —</option></select>
+      <button class="apply-btn" id="btn-mic" disabled>Switch</button>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client = null;
+    let localStream = null;
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    async function enumerateDevices() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(d => d.kind === 'videoinput');
+      const mics    = devices.filter(d => d.kind === 'audioinput');
+
+      const camSel = $('sel-camera');
+      camSel.innerHTML = cameras.map((d, i) =>
+        `<option value="${d.deviceId}">${d.label || `Camera ${i + 1}`}</option>`
+      ).join('');
+
+      const micSel = $('sel-mic');
+      micSel.innerHTML = mics.map((d, i) =>
+        `<option value="${d.deviceId}">${d.label || `Microphone ${i + 1}`}</option>`
+      ).join('');
+
+      log(`Found ${cameras.length} camera(s), ${mics.length} microphone(s)`);
+      $('sel-camera').disabled = false;
+      $('sel-mic').disabled    = false;
+      $('btn-camera').disabled = cameras.length < 2;
+      $('btn-mic').disabled    = mics.length < 2;
+
+      if (cameras.length < 2) log('Only one camera found — switch unavailable', 'info');
+      if (mics.length < 2)    log('Only one mic found — switch unavailable', 'info');
+    }
+
+    $('btn-join').addEventListener('click', async () => {
+      const host   = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        $('local-video').srcObject = localStream;
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, async () => {
+          log('Publishing', 'success');
+          $('btn-join').disabled  = true;
+          $('btn-leave').disabled = false;
+          await enumerateDevices();
+        });
+
+        log('Joining room…');
+        await client.join(roomId, userId, token, 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-camera').addEventListener('click', async () => {
+      const deviceId = $('sel-camera').value;
+      if (!client || !deviceId) return;
+      try {
+        log(`Switching camera to: ${$('sel-camera').selectedOptions[0]?.text}…`);
+        await client.switchVideoDeviceWithTrackReplacement(deviceId);
+        log('Camera switched', 'success');
+      } catch (err) {
+        log(`Camera switch failed: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-mic').addEventListener('click', async () => {
+      const deviceId = $('sel-mic').value;
+      if (!client || !deviceId) return;
+      try {
+        log(`Switching microphone to: ${$('sel-mic').selectedOptions[0]?.text}…`);
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: deviceId } },
+          video: false
+        });
+        const newAudioTrack = newStream.getAudioTracks()[0];
+        await client.mediaStreamManager.replaceAudioTrack(client._whipClient, newAudioTrack);
+        log('Microphone switched', 'success');
+      } catch (err) {
+        log(`Microphone switch failed: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('local-video').srcObject = null;
+        client = null; localStream = null;
+        $('sel-camera').innerHTML = '<option>— enumerate after join —</option>';
+        $('sel-mic').innerHTML    = '<option>— enumerate after join —</option>';
+        $('sel-camera').disabled  = true;
+        $('sel-mic').disabled     = true;
+        $('btn-camera').disabled  = true;
+        $('btn-mic').disabled     = true;
+        $('btn-join').disabled    = false;
+        $('btn-leave').disabled   = true;
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>

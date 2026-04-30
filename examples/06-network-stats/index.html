@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>06 – Network Stats | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 640px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join  { background: #238636; color: #fff; }
+    #btn-leave { background: #da3633; color: #fff; }
+
+    video { width: 240px; height: 135px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; margin-bottom: 20px; }
+
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; max-width: 860px; margin-bottom: 24px; }
+    .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
+    .stat-card .name { font-size: 0.75rem; color: #8b949e; margin-bottom: 6px; }
+    .stat-card .value { font-size: 1.4rem; font-weight: 700; font-family: monospace; }
+    .stat-card .unit  { font-size: 0.7rem; color: #8b949e; margin-left: 4px; }
+    .good   { color: #3fb950; }
+    .warn   { color: #f0883e; }
+    .bad    { color: #f85149; }
+
+    #quality-bar { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; max-width: 860px; margin-bottom: 24px; }
+    #quality-bar h3 { font-size: 0.8rem; color: #8b949e; margin-bottom: 10px; }
+    .bar-track { height: 8px; background: #30363d; border-radius: 4px; overflow: hidden; }
+    .bar-fill { height: 100%; width: 0%; background: #3fb950; border-radius: 4px; transition: width .4s, background .4s; }
+
+    #issues-box { background: #3d1414; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; max-width: 860px; margin-bottom: 20px; display: none; }
+    #issues-box h3 { font-size: 0.8rem; color: #f85149; margin-bottom: 8px; }
+    #issues-list { font-size: 0.8rem; color: #ff5555; }
+
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+    .log-warn    { color: #f0883e; }
+  </style>
+</head>
+<body>
+  <h1>06 – Network Stats</h1>
+  <p class="subtitle">Monitor real-time WebRTC connection quality: bitrate, RTT, packet loss, and jitter.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div>
+      <label>Poll interval (ms)</label>
+      <input type="number" id="poll-interval" value="2000" min="500" />
+    </div>
+    <div><label>Packet loss threshold (%)</label><input type="number" id="th-loss" value="5" /></div>
+    <div><label>RTT threshold (ms)</label><input type="number" id="th-rtt" value="200" /></div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <video id="local-video" autoplay playsinline muted></video>
+
+  <div id="quality-bar">
+    <h3>Overall Network Quality</h3>
+    <div class="bar-track"><div class="bar-fill" id="quality-fill"></div></div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="name">Outbound Bitrate</div>
+      <div class="value good" id="s-bitrate">—<span class="unit">kbps</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="name">Round Trip Time</div>
+      <div class="value good" id="s-rtt">—<span class="unit">ms</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="name">Packet Loss</div>
+      <div class="value good" id="s-loss">—<span class="unit">%</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="name">Jitter</div>
+      <div class="value good" id="s-jitter">—<span class="unit">ms</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="name">Frame Rate</div>
+      <div class="value good" id="s-fps">—<span class="unit">fps</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="name">Packets Sent</div>
+      <div class="value good" id="s-packets">—</div>
+    </div>
+  </div>
+
+  <div id="issues-box">
+    <h3>&#x26A0; Issues Detected</h3>
+    <div id="issues-list"></div>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client = null;
+    let localStream = null;
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    function quality(val, warnThr, badThr, invert = false) {
+      if (val === null || val === undefined) return '';
+      if (invert) return val > badThr ? 'bad' : val > warnThr ? 'warn' : 'good';
+      return val < badThr ? 'bad' : val < warnThr ? 'warn' : 'good';
+    }
+
+    function setStat(id, value, cls, unit = '') {
+      const el = $(id);
+      el.innerHTML = value !== null ? `${value}${unit ? `<span class="unit">${unit}</span>` : ''}` : '—';
+      el.className = `value ${cls}`;
+    }
+
+    function updateQualityBar(score) {
+      const fill = $('quality-fill');
+      fill.style.width = `${score}%`;
+      fill.style.background = score > 70 ? '#3fb950' : score > 40 ? '#f0883e' : '#f85149';
+    }
+
+    $('btn-join').addEventListener('click', async () => {
+      const host     = $('host').value.trim();
+      const roomId   = $('room-id').value.trim();
+      const userId   = $('user-id').value.trim() || `user-${Date.now()}`;
+      const interval = parseInt($('poll-interval').value, 10) || 2000;
+      const thLoss   = parseFloat($('th-loss').value) || 5;
+      const thRtt    = parseFloat($('th-rtt').value) || 200;
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        $('local-video').srcObject = localStream;
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+          statsPollingInterval: interval,
+          packetLossThreshold:  thLoss,
+          rttThreshold:         thRtt
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+          log('Publishing — stats monitoring active', 'success');
+          $('btn-join').disabled  = true;
+          $('btn-leave').disabled = false;
+        });
+
+        client.addEventListener(ConferenceEvents.NETWORK_SCORES_UPDATED, e => {
+          const scores = e.detail;
+          if (!scores) return;
+          const score = scores.overall ?? scores.score ?? 100;
+          updateQualityBar(score);
+        });
+
+        client.addEventListener(ConferenceEvents.STATS_ANALYZED, e => {
+          const stats = e.detail;
+          if (!stats) return;
+
+          const bitrate = stats.outboundBitrateKbps ?? stats.bitrate;
+          const rtt     = stats.roundTripTime       ?? stats.rtt;
+          const loss    = stats.packetLossPercent   ?? stats.packetLoss;
+          const jitter  = stats.jitter;
+          const fps     = stats.framesPerSecond      ?? stats.frameRate;
+          const pkts    = stats.packetsSent;
+
+          if (bitrate !== undefined) setStat('s-bitrate', Math.round(bitrate), quality(bitrate, 500, 100), 'kbps');
+          if (rtt     !== undefined) setStat('s-rtt',     Math.round(rtt),     quality(rtt,     thRtt/2, thRtt, true), 'ms');
+          if (loss    !== undefined) setStat('s-loss',    loss.toFixed(1),      quality(loss,    thLoss/2, thLoss, true), '%');
+          if (jitter  !== undefined) setStat('s-jitter',  Math.round(jitter),  quality(jitter,  25, 50, true), 'ms');
+          if (fps     !== undefined) setStat('s-fps',     Math.round(fps),      quality(fps, 20, 10), 'fps');
+          if (pkts    !== undefined) setStat('s-packets', pkts.toLocaleString(), 'good', '');
+        });
+
+        client.addEventListener(ConferenceEvents.WEBRTC_ISSUES_DETECTED, e => {
+          const issues = e.detail;
+          if (!issues || !issues.length) {
+            $('issues-box').style.display = 'none';
+            return;
+          }
+          $('issues-box').style.display = '';
+          $('issues-list').innerHTML = issues.map(i => `<div>• ${typeof i === 'string' ? i : JSON.stringify(i)}</div>`).join('');
+          log(`Issues detected: ${issues.length}`, 'warn');
+        });
+
+        client.addEventListener(ConferenceEvents.ISSUES_DETECTED, e => {
+          const issues = e.detail;
+          if (Array.isArray(issues) && issues.length) {
+            log(`Connection issue: ${issues.map(i => i.type || i).join(', ')}`, 'warn');
+          }
+        });
+
+        log('Joining room…');
+        await client.join(roomId, userId, '', 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('local-video').srcObject = null;
+        client = null; localStream = null;
+        ['s-bitrate','s-rtt','s-loss','s-jitter','s-fps','s-packets'].forEach(id => {
+          $(id).innerHTML = '—'; $(id).className = 'value';
+        });
+        updateQualityBar(0);
+        $('issues-box').style.display = 'none';
+        $('btn-join').disabled  = false;
+        $('btn-leave').disabled = true;
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>

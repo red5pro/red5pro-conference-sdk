@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>04 – Local Recording | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 480px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input, select { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join     { background: #238636; color: #fff; }
+    #btn-leave    { background: #da3633; color: #fff; }
+    #btn-record   { background: #1f6feb; color: #fff; }
+    #btn-record.recording { background: #da3633; }
+    #btn-pause    { background: #6e40c9; color: #fff; }
+    #btn-download { background: #238636; color: #fff; }
+
+    video { width: 320px; height: 180px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; margin-bottom: 16px; }
+
+    #rec-status { display: flex; align-items: center; gap: 10px; font-size: 0.875rem; margin-bottom: 16px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #30363d; }
+    .dot.active { background: #f85149; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+    #stats-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; font-family: monospace; font-size: 0.8rem; margin-bottom: 20px; max-width: 340px; }
+    #stats-box div { display: flex; justify-content: space-between; padding: 2px 0; }
+    #stats-box span { color: #3fb950; }
+
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+  </style>
+</head>
+<body>
+  <h1>04 – Local Recording</h1>
+  <p class="subtitle">Record the local camera stream and download it as a WebM file or ZIP archive.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div>
+      <label>MIME type</label>
+      <select id="mime">
+        <option value="">Auto-detect</option>
+        <option value="video/webm;codecs=vp9">video/webm (VP9)</option>
+        <option value="video/webm;codecs=vp8">video/webm (VP8)</option>
+        <option value="video/mp4">video/mp4</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <video id="local-video" autoplay playsinline muted></video>
+
+  <div id="rec-status">
+    <div class="dot" id="rec-dot"></div>
+    <span id="rec-label">Idle</span>
+  </div>
+
+  <div id="stats-box">
+    <div>Chunks recorded <span id="s-chunks">0</span></div>
+    <div>Total size <span id="s-size">0 B</span></div>
+    <div>Duration <span id="s-dur">0s</span></div>
+  </div>
+
+  <div class="row">
+    <button id="btn-record" disabled>Start Recording</button>
+    <button id="btn-pause"  disabled>Pause</button>
+    <button id="btn-download" disabled>Download ZIP</button>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client = null;
+    let localStream = null;
+    let isRecording = false;
+    let isPaused = false;
+    let statsTimer = null;
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    function formatBytes(b) {
+      if (b < 1024) return `${b} B`;
+      if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
+      return `${(b/1048576).toFixed(2)} MB`;
+    }
+
+    function updateStats() {
+      if (!client) return;
+      const s = client.getLocalRecordingStatus();
+      $('s-chunks').textContent = s.chunks;
+      $('s-size').textContent   = formatBytes(s.totalSize);
+      $('s-dur').textContent    = s.startTime ? `${Math.floor((Date.now() - s.startTime) / 1000)}s` : '0s';
+    }
+
+    $('btn-join').addEventListener('click', async () => {
+      const host   = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        $('local-video').srcObject = localStream;
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+          log('Publishing — recorder ready', 'success');
+          $('btn-join').disabled   = true;
+          $('btn-leave').disabled  = false;
+          $('btn-record').disabled = false;
+        });
+
+        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_STARTED, () => {
+          log('Recording started', 'success');
+          $('rec-dot').classList.add('active');
+          $('rec-label').textContent = 'Recording';
+          $('btn-pause').disabled    = false;
+          $('btn-download').disabled = false;
+          statsTimer = setInterval(updateStats, 500);
+        });
+
+        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_STOPPED, () => {
+          log('Recording stopped');
+          $('rec-dot').classList.remove('active');
+          $('rec-label').textContent = 'Stopped';
+          $('btn-pause').disabled = true;
+          clearInterval(statsTimer);
+          updateStats();
+        });
+
+        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_PAUSED, () => {
+          log('Recording paused');
+          $('rec-dot').classList.remove('active');
+          $('rec-label').textContent = 'Paused';
+          $('btn-pause').textContent = 'Resume';
+          isPaused = true;
+        });
+
+        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_RESUMED, () => {
+          log('Recording resumed');
+          $('rec-dot').classList.add('active');
+          $('rec-label').textContent = 'Recording';
+          $('btn-pause').textContent = 'Pause';
+          isPaused = false;
+        });
+
+        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_ERROR, e => {
+          log(`Recording error: ${e.detail?.message || 'unknown'}`, 'error');
+        });
+
+        log('Joining room…');
+        await client.join(roomId, userId, '', 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-record').addEventListener('click', () => {
+      if (!client || !localStream) return;
+      if (isRecording) {
+        client.stopLocalRecording();
+        isRecording = false;
+        $('btn-record').textContent = 'Start Recording';
+        $('btn-record').classList.remove('recording');
+        $('btn-pause').disabled = true;
+      } else {
+        const mime = $('mime').value || undefined;
+        client.startLocalRecording(localStream, 1000, mime);
+        isRecording = true;
+        $('btn-record').textContent = 'Stop Recording';
+        $('btn-record').classList.add('recording');
+      }
+    });
+
+    $('btn-pause').addEventListener('click', () => {
+      if (!client) return;
+      if (isPaused) client.resumeLocalRecording();
+      else          client.pauseLocalRecording();
+    });
+
+    $('btn-download').addEventListener('click', async () => {
+      if (!client) return;
+      try {
+        log('Generating ZIP download…');
+        const ok = await client.downloadLocalRecording('my-recording');
+        if (ok) log('Download started', 'success');
+        else    log('No recording data to download', 'error');
+      } catch (err) {
+        log(`Download error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      clearInterval(statsTimer);
+      try {
+        if (isRecording) client.stopLocalRecording();
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('local-video').srcObject = null;
+        client = null; localStream = null; isRecording = false; isPaused = false;
+        $('rec-dot').classList.remove('active');
+        $('rec-label').textContent = 'Idle';
+        $('btn-join').disabled   = false;
+        $('btn-leave').disabled  = true;
+        $('btn-record').disabled = true;
+        $('btn-pause').disabled  = true;
+        $('btn-record').textContent = 'Start Recording';
+        $('btn-record').classList.remove('recording');
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>

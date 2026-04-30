@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>03 – Screen Share | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 480px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join   { background: #238636; color: #fff; }
+    #btn-leave  { background: #da3633; color: #fff; }
+    #btn-screen { background: #1f6feb; color: #fff; }
+    #btn-screen.active { background: #da3633; }
+
+    .videos { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+    .video-tile { position: relative; }
+    .video-tile video { width: 320px; height: 180px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; }
+    .video-tile .label { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+
+    #options { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; max-width: 400px; margin-bottom: 20px; }
+    #options h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 10px; }
+    .opt-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 0.85rem; }
+    .opt-row input[type=number] { width: 80px; }
+    .opt-row input[type=checkbox] { width: auto; }
+
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 160px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+  </style>
+</head>
+<body>
+  <h1>03 – Screen Share</h1>
+  <p class="subtitle">Join a room, then start/stop sharing your screen as a second stream.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token (optional)</label><input id="token" /></div>
+  </div>
+
+  <div id="options">
+    <h3>Screen Share Options</h3>
+    <div class="opt-row">
+      <label>Include audio</label>
+      <input type="checkbox" id="opt-audio" checked />
+    </div>
+    <div class="opt-row">
+      <label>Max width</label>
+      <input type="number" id="opt-width" value="1920" />
+    </div>
+    <div class="opt-row">
+      <label>Max height</label>
+      <input type="number" id="opt-height" value="1080" />
+    </div>
+    <div class="opt-row">
+      <label>Frame rate</label>
+      <input type="number" id="opt-fps" value="30" />
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-screen" disabled>Start Screen Share</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <div class="videos">
+    <div class="video-tile">
+      <video id="camera-video" autoplay playsinline muted></video>
+      <div class="label">Camera</div>
+    </div>
+    <div class="video-tile" id="screen-tile" style="display:none">
+      <video id="screen-video" autoplay playsinline muted></video>
+      <div class="label">Screen</div>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client = null;
+    let localStream = null;
+    let sharing = false;
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    $('btn-join').addEventListener('click', async () => {
+      const host   = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        $('camera-video').srcObject = localStream;
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+          log('Publishing camera', 'success');
+          $('btn-join').disabled   = true;
+          $('btn-leave').disabled  = false;
+          $('btn-screen').disabled = false;
+        });
+
+        client.addEventListener(ConferenceEvents.SCREEN_SHARE_STARTED, e => {
+          log('Screen share started', 'success');
+          sharing = true;
+          $('btn-screen').textContent = 'Stop Screen Share';
+          $('btn-screen').classList.add('active');
+          const stream = e.detail?.stream || e.detail;
+          if (stream) {
+            $('screen-video').srcObject = stream;
+            $('screen-tile').style.display = '';
+          }
+        });
+
+        client.addEventListener(ConferenceEvents.SCREEN_SHARE_STOPPED, () => {
+          log('Screen share stopped');
+          sharing = false;
+          $('btn-screen').textContent = 'Start Screen Share';
+          $('btn-screen').classList.remove('active');
+          $('screen-video').srcObject = null;
+          $('screen-tile').style.display = 'none';
+        });
+
+        client.addEventListener(ConferenceEvents.SCREEN_SHARE_FAILED, e => {
+          log(`Screen share failed: ${e.detail?.message || 'unknown'}`, 'error');
+        });
+
+        log('Joining room…');
+        await client.join(roomId, userId, token, 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-screen').addEventListener('click', async () => {
+      if (!client) return;
+      try {
+        if (sharing) {
+          await client.stopScreenShare();
+        } else {
+          await client.startScreenShare({
+            includeAudio: $('opt-audio').checked,
+            width:  parseInt($('opt-width').value,  10),
+            height: parseInt($('opt-height').value, 10),
+            frameRate: parseInt($('opt-fps').value, 10)
+          });
+        }
+      } catch (err) {
+        log(`Screen share toggle error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('camera-video').srcObject = null;
+        $('screen-video').srcObject = null;
+        $('screen-tile').style.display = 'none';
+        client = null; localStream = null; sharing = false;
+        $('btn-screen').textContent = 'Start Screen Share';
+        $('btn-screen').classList.remove('active');
+        $('btn-join').disabled   = false;
+        $('btn-leave').disabled  = true;
+        $('btn-screen').disabled = true;
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>
