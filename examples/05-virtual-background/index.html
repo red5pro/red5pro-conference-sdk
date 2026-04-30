@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>05 – Virtual Background | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 480px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join  { background: #238636; color: #fff; }
+    #btn-leave { background: #da3633; color: #fff; }
+
+    video { width: 320px; height: 180px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; margin-bottom: 20px; }
+
+    #bg-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; max-width: 480px; margin-bottom: 20px; }
+    #bg-panel h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 14px; }
+
+    .bg-options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .bg-btn { padding: 8px 14px; border: 2px solid #30363d; border-radius: 8px; background: #0d1117; color: #e6edf3; cursor: pointer; font-size: 0.8rem; transition: border-color .15s; }
+    .bg-btn:hover    { border-color: #1f6feb; }
+    .bg-btn.selected { border-color: #1f6feb; background: #161b22; }
+    .bg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .extra-opt { display: none; gap: 10px; align-items: center; margin-top: 10px; }
+    .extra-opt.visible { display: flex; }
+    .extra-opt label { margin-bottom: 0; min-width: 80px; }
+    .extra-opt input { flex: 1; }
+
+    #status { font-size: 0.8rem; color: #8b949e; margin-top: 8px; }
+
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+    .log-warn    { color: #f0883e; }
+  </style>
+</head>
+<body>
+  <h1>05 – Virtual Background</h1>
+  <p class="subtitle">Apply blur, color, or image backgrounds to your camera using MediaPipe segmentation. Requires Chrome/Edge 94+.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token (optional)</label><input id="token" /></div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <video id="local-video" autoplay playsinline muted></video>
+
+  <div id="bg-panel">
+    <h3>Virtual Background</h3>
+    <div class="bg-options">
+      <button class="bg-btn selected" data-type="none"        disabled>&#x2715; None</button>
+      <button class="bg-btn"          data-type="slight-blur" disabled>&#x1F300; Slight Blur</button>
+      <button class="bg-btn"          data-type="blur"        disabled>&#x1F4A8; Full Blur</button>
+      <button class="bg-btn"          data-type="color"       disabled>&#x1F3A8; Color</button>
+      <button class="bg-btn"          data-type="image"       disabled>&#x1F5BC; Image</button>
+    </div>
+
+    <div class="extra-opt" id="opt-color">
+      <label>Color</label>
+      <input type="color" id="color-picker" value="#1a73e8" />
+    </div>
+
+    <div class="extra-opt" id="opt-image">
+      <label>Image URL</label>
+      <input type="url" id="image-url" placeholder="https://example.com/bg.jpg" />
+    </div>
+
+    <p id="status">Not initialized</p>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client      = null;
+    let localStream = null;
+    let currentType = 'none';
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    function setStatus(msg) { $('status').textContent = msg; }
+
+    function selectBtn(type) {
+      document.querySelectorAll('.bg-btn').forEach(b => b.classList.remove('selected'));
+      document.querySelector(`.bg-btn[data-type="${type}"]`)?.classList.add('selected');
+      $('opt-color').classList.toggle('visible', type === 'color');
+      $('opt-image').classList.toggle('visible', type === 'image');
+    }
+
+    async function applyBackground(type) {
+      if (!client) return;
+      try {
+        const options = {};
+        if (type === 'color') options.color = $('color-picker').value;
+        if (type === 'image') options.imageUrl = $('image-url').value;
+
+        if (type === 'none') {
+          await client.disableVirtualBackground();
+        } else if (currentType === 'none') {
+          await client.enableVirtualBackground(type, options);
+        } else {
+          await client.changeVirtualBackground(type, options);
+        }
+      } catch (err) {
+        log(`Background error: ${err.message}`, 'error');
+      }
+    }
+
+    document.querySelectorAll('.bg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const type = btn.dataset.type;
+        selectBtn(type);
+        applyBackground(type);
+      });
+    });
+
+    $('btn-join').addEventListener('click', async () => {
+      const host   = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        $('local-video').srcObject = localStream;
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, async () => {
+          log('Publishing — initializing virtual background…');
+          $('btn-join').disabled  = true;
+          $('btn-leave').disabled = false;
+          try {
+            await client.initializeVirtualBackground();
+          } catch (err) {
+            log(`VB init failed: ${err.message}`, 'error');
+          }
+        });
+
+        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_INITIALIZED, () => {
+          log('Virtual background initialized', 'success');
+          setStatus('Ready — select a background below');
+          document.querySelectorAll('.bg-btn').forEach(b => b.disabled = false);
+        });
+
+        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_ENABLED, e => {
+          currentType = e.detail?.type || 'blur';
+          log(`Background enabled: ${currentType}`, 'success');
+          setStatus(`Active: ${currentType}`);
+        });
+
+        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_DISABLED, () => {
+          currentType = 'none';
+          log('Background disabled');
+          setStatus('No background');
+        });
+
+        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_CHANGED, e => {
+          currentType = e.detail?.type || currentType;
+          log(`Background changed to: ${currentType}`, 'success');
+          setStatus(`Active: ${currentType}`);
+        });
+
+        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_ENABLE_FAILED, e => {
+          log(`Enable failed: ${e.detail?.message}`, 'error');
+        });
+
+        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_INIT_FAILED, e => {
+          log(`Init failed: ${e.detail?.message}`, 'error');
+          setStatus('Initialization failed — Chrome/Edge 94+ required');
+        });
+
+        log('Joining room…');
+        await client.join(roomId, userId, token, 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('local-video').srcObject = null;
+        client = null; localStream = null; currentType = 'none';
+        document.querySelectorAll('.bg-btn').forEach(b => b.disabled = true);
+        selectBtn('none');
+        setStatus('Not initialized');
+        $('btn-join').disabled  = false;
+        $('btn-leave').disabled = true;
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>

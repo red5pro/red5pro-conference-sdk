@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>01 – Basic Join | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 640px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .controls { display: flex; gap: 10px; margin-bottom: 24px; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join  { background: #238636; color: #fff; }
+    #btn-leave { background: #da3633; color: #fff; }
+
+    #status { font-size: 0.875rem; color: #8b949e; margin-bottom: 20px; }
+    #status.connected { color: #3fb950; }
+    #status.error     { color: #f85149; }
+
+    #video-grid { display: flex; flex-wrap: wrap; gap: 12px; }
+    .video-tile { position: relative; width: 320px; }
+    .video-tile video { width: 100%; height: 180px; background: #161b22; border-radius: 8px; object-fit: cover; display: block; }
+    .video-tile .label { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; }
+
+    #log { margin-top: 24px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+  </style>
+</head>
+<body>
+  <h1>01 – Basic Join</h1>
+  <p class="subtitle">Join a room, publish camera + mic, auto-subscribe to other participants, then leave.</p>
+
+  <div class="config">
+    <div>
+      <label>Host</label>
+      <input id="host" placeholder="your-server.red5.net" />
+    </div>
+    <div>
+      <label>Room ID</label>
+      <input id="room-id" value="testroom" />
+    </div>
+    <div>
+      <label>User ID</label>
+      <input id="user-id" placeholder="alice" />
+    </div>
+    <div>
+      <label>Token (optional)</label>
+      <input id="token" placeholder="JWT token" />
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <p id="status">Not connected</p>
+
+  <div id="video-grid"></div>
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+
+    const $ = id => document.getElementById(id);
+    let client = null;
+    let localStream = null;
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    function setStatus(text, cls = '') {
+      $('status').textContent = text;
+      $('status').className = cls;
+    }
+
+    function addVideoTile(id, stream, label) {
+      const tile = document.createElement('div');
+      tile.className = 'video-tile';
+      tile.id = `tile-${id}`;
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.playsInline = true;
+      if (label === 'You') video.muted = true;
+      video.srcObject = stream;
+      const lbl = document.createElement('div');
+      lbl.className = 'label';
+      lbl.textContent = label;
+      tile.appendChild(video);
+      tile.appendChild(lbl);
+      $('video-grid').appendChild(tile);
+    }
+
+    function removeVideoTile(id) {
+      const tile = $(`tile-${id}`);
+      if (tile) tile.remove();
+    }
+
+    $('btn-join').addEventListener('click', async () => {
+      const host   = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
+
+      if (!host) { log('Host is required', 'error'); return; }
+
+      try {
+        log('Requesting camera + microphone…');
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        addVideoTile('local', localStream, 'You');
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+          log('Local stream published', 'success');
+          setStatus('Connected – publishing', 'connected');
+          $('btn-join').disabled = true;
+          $('btn-leave').disabled = false;
+        });
+
+        client.addEventListener(ConferenceEvents.NEW_PARTICIPANT, async e => {
+          const user = e.detail;
+          log(`New participant: ${user.uid}`);
+          try {
+            const info = await client.subscribe(user);
+            if (info?.mediaStream) addVideoTile(user.uid, info.mediaStream, user.uid);
+          } catch (err) {
+            log(`Subscribe failed for ${user.uid}: ${err.message}`, 'error');
+          }
+        });
+
+        client.addEventListener(ConferenceEvents.PARTICIPANT_DISCONNECTED, e => {
+          const user = e.detail;
+          log(`Participant left: ${user.uid}`);
+          removeVideoTile(user.uid);
+        });
+
+        client.addEventListener(ConferenceEvents.SUBSCRIBE_SUCCESS, e => {
+          log(`Subscribed to ${e.detail?.user?.uid || 'participant'}`, 'success');
+        });
+
+        client.addEventListener(ConferenceEvents.JOIN_FAILED, e => {
+          log(`Join failed: ${e.detail?.message || 'unknown error'}`, 'error');
+          setStatus('Join failed', 'error');
+        });
+
+        setStatus('Joining…');
+        log('Joining room…');
+        await client.join(roomId, userId, token, 'publisher', localStream, true, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+        setStatus('Error', 'error');
+      }
+    });
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        $('video-grid').innerHTML = '';
+        client = null;
+        localStream = null;
+        setStatus('Not connected');
+        $('btn-join').disabled = false;
+        $('btn-leave').disabled = true;
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>

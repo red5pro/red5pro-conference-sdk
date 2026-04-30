@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>10 – File Transfer | Red5 Pro Conference SDK</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 1.25rem; margin-bottom: 4px; }
+    p.subtitle { color: #8b949e; font-size: 0.875rem; margin-bottom: 24px; }
+
+    .config { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 640px; margin-bottom: 20px; }
+    label { font-size: 0.8rem; color: #8b949e; display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 8px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; font-size: 0.875rem; }
+
+    .row { display: flex; gap: 10px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.875rem; font-weight: 600; transition: opacity .15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #btn-join  { background: #238636; color: #fff; }
+    #btn-leave { background: #da3633; color: #fff; }
+    #btn-send  { background: #1f6feb; color: #fff; }
+    #btn-list  { background: #6e40c9; color: #fff; }
+
+    .send-area { background: #161b22; border: 2px dashed #30363d; border-radius: 8px; padding: 20px; text-align: center; max-width: 500px; margin-bottom: 20px; cursor: pointer; transition: border-color .15s; }
+    .send-area:hover, .send-area.drag-over { border-color: #1f6feb; }
+    .send-area input[type=file] { display: none; }
+    .send-area p { color: #8b949e; font-size: 0.875rem; }
+    #selected-file { margin-top: 8px; font-size: 0.8rem; color: #3fb950; }
+
+    #progress-bar { height: 4px; background: #30363d; border-radius: 2px; max-width: 500px; margin-bottom: 20px; overflow: hidden; }
+    #progress-fill { height: 100%; width: 0%; background: #1f6feb; border-radius: 2px; transition: width .3s; }
+
+    #files-panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; max-width: 700px; margin-bottom: 20px; }
+    #files-panel h3 { font-size: 0.85rem; color: #8b949e; margin-bottom: 10px; }
+    #file-list { display: flex; flex-direction: column; gap: 8px; }
+    .file-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; background: #21262d; border-radius: 6px; }
+    .file-item .info .name { font-size: 0.875rem; }
+    .file-item .info .meta { font-size: 0.72rem; color: #8b949e; margin-top: 2px; }
+    .dl-btn { padding: 4px 12px; background: #238636; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-weight: 600; }
+    .dl-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .empty-hint { font-size: 0.78rem; color: #484f58; text-align: center; padding: 16px 0; }
+
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.78rem; }
+    .log-info    { color: #8be9fd; }
+    .log-success { color: #50fa7b; }
+    .log-error   { color: #ff5555; }
+    .log-warn    { color: #f0883e; }
+  </style>
+</head>
+<body>
+  <h1>10 – File Transfer</h1>
+  <p class="subtitle">Send and receive files between conference participants using PubNub file sharing. Requires PubNub keys.</p>
+
+  <div class="config">
+    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
+    <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token (optional)</label><input id="token" /></div>
+    <div><label>PubNub Publish Key</label><input id="pn-pub" placeholder="pub-c-…" /></div>
+    <div><label>PubNub Subscribe Key</label><input id="pn-sub" placeholder="sub-c-…" /></div>
+  </div>
+
+  <div class="row">
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" disabled>Leave Room</button>
+  </div>
+
+  <div class="send-area" id="drop-zone">
+    <input type="file" id="file-input" multiple />
+    <p>Click to select files or drag &amp; drop here</p>
+    <div id="selected-file"></div>
+  </div>
+
+  <div id="progress-bar"><div id="progress-fill"></div></div>
+
+  <div class="row">
+    <button id="btn-send" disabled>Send File(s)</button>
+    <button id="btn-list" disabled>Refresh File List</button>
+  </div>
+
+  <div id="files-panel">
+    <h3>Shared Files</h3>
+    <div id="file-list"><div class="empty-hint">No files shared yet</div></div>
+  </div>
+
+  <div id="log"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <script>
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+    const $ = id => document.getElementById(id);
+
+    let client = null;
+    let localStream = null;
+    let selectedFiles = [];
+
+    function log(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `log-${type}`;
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      $('log').appendChild(el);
+      $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    function formatBytes(b) {
+      if (!b) return '?';
+      if (b < 1024) return `${b} B`;
+      if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
+      return `${(b/1048576).toFixed(2)} MB`;
+    }
+
+    function setProgress(pct) {
+      $('progress-fill').style.width = `${pct}%`;
+    }
+
+    function renderFileList(files) {
+      const list = $('file-list');
+      if (!files || files.length === 0) {
+        list.innerHTML = '<div class="empty-hint">No files shared yet</div>';
+        return;
+      }
+      list.innerHTML = '';
+      files.forEach(f => {
+        const item = document.createElement('div');
+        item.className = 'file-item';
+        item.innerHTML = `
+          <div class="info">
+            <div class="name">${f.name}</div>
+            <div class="meta">${formatBytes(f.size)} · ID: ${f.id}</div>
+          </div>
+          <button class="dl-btn" data-id="${f.id}" data-name="${f.name}">Download</button>`;
+        list.appendChild(item);
+      });
+
+      list.querySelectorAll('.dl-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = '…';
+          try {
+            const blob = await client.downloadFile(btn.dataset.id, btn.dataset.name);
+            if (!blob) throw new Error('Empty response');
+            const url = URL.createObjectURL(blob);
+            const a   = document.createElement('a');
+            a.href = url; a.download = btn.dataset.name; a.click();
+            URL.revokeObjectURL(url);
+            log(`Downloaded: ${btn.dataset.name}`, 'success');
+          } catch (err) {
+            log(`Download failed: ${err.message}`, 'error');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = 'Download';
+          }
+        });
+      });
+    }
+
+    async function refreshFileList() {
+      if (!client) return;
+      try {
+        const files = await client.listFiles(20);
+        renderFileList(files);
+        log(`Listed ${files.length} file(s)`);
+      } catch (err) {
+        log(`List files failed: ${err.message}`, 'error');
+      }
+    }
+
+    // Drop zone
+    const dz = $('drop-zone');
+    dz.addEventListener('click', () => $('file-input').click());
+    dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+    dz.addEventListener('drop', e => {
+      e.preventDefault();
+      dz.classList.remove('drag-over');
+      selectedFiles = Array.from(e.dataTransfer.files);
+      $('selected-file').textContent = selectedFiles.map(f => f.name).join(', ');
+    });
+
+    $('file-input').addEventListener('change', e => {
+      selectedFiles = Array.from(e.target.files);
+      $('selected-file').textContent = selectedFiles.map(f => f.name).join(', ');
+    });
+
+    $('btn-join').addEventListener('click', async () => {
+      const host  = $('host').value.trim();
+      const roomId = $('room-id').value.trim();
+      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
+      const pnPub  = $('pn-pub').value.trim();
+      const pnSub  = $('pn-sub').value.trim();
+
+      if (!host)            { log('Host is required', 'error'); return; }
+      if (!pnPub || !pnSub) { log('PubNub keys required for file transfer', 'error'); return; }
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+
+        client = new ConferenceClient({
+          host,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+          pubnubPublishKey:   pnPub,
+          pubnubSubscribeKey: pnSub
+        });
+
+        client.addEventListener(ConferenceEvents.USER_PUBLISHED, async () => {
+          log('Joined — file transfer ready', 'success');
+          $('btn-join').disabled  = true;
+          $('btn-leave').disabled = false;
+          $('btn-send').disabled  = false;
+          $('btn-list').disabled  = false;
+          await refreshFileList();
+        });
+
+        log('Joining room…');
+        await client.join(roomId, userId, token, 'publisher', localStream, false, true);
+      } catch (err) {
+        log(`Error: ${err.message}`, 'error');
+      }
+    });
+
+    $('btn-send').addEventListener('click', async () => {
+      if (!client || selectedFiles.length === 0) {
+        log('Select at least one file first', 'warn');
+        return;
+      }
+      $('btn-send').disabled = true;
+      setProgress(0);
+      try {
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const file = selectedFiles[i];
+          log(`Sending: ${file.name} (${formatBytes(file.size)})…`);
+          setProgress(Math.round(((i) / selectedFiles.length) * 100));
+          await client.sendFile(file, { sender: $('user-id').value.trim() });
+          log(`Sent: ${file.name}`, 'success');
+        }
+        setProgress(100);
+        selectedFiles = [];
+        $('file-input').value = '';
+        $('selected-file').textContent = '';
+        await refreshFileList();
+        setTimeout(() => setProgress(0), 1500);
+      } catch (err) {
+        log(`Send failed: ${err.message}`, 'error');
+        setProgress(0);
+      } finally {
+        $('btn-send').disabled = false;
+      }
+    });
+
+    $('btn-list').addEventListener('click', refreshFileList);
+
+    $('btn-leave').addEventListener('click', async () => {
+      try {
+        await client.leave();
+        localStream?.getTracks().forEach(t => t.stop());
+        client = null; localStream = null;
+        $('btn-join').disabled  = false;
+        $('btn-leave').disabled = true;
+        $('btn-send').disabled  = true;
+        $('btn-list').disabled  = true;
+        $('file-list').innerHTML = '<div class="empty-hint">No files shared yet</div>';
+        log('Left room');
+      } catch (err) {
+        log(`Leave error: ${err.message}`, 'error');
+      }
+    });
+  </script>
+</body>
+</html>
