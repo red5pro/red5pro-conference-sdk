@@ -196,6 +196,8 @@ interface ProcessorStatus {
     hasOriginalTrack: boolean;
     hasProcessedTrack: boolean;
     supportsInsertableStreams: boolean;
+    supportsCanvasFallback: boolean;
+    isFallbackMode: boolean;
     hasMediaPipe: boolean;
     polyfillsLoaded: boolean;
     browserInfo: BrowserInfo;
@@ -208,6 +210,8 @@ declare class VirtualBackgroundProcessor {
     private selfieSegmentation;
     private canvas;
     private ctx;
+    private inputCanvas;
+    private inputCtx;
     isInitialized: boolean;
     private isProcessing;
     backgroundType: BackgroundType;
@@ -219,12 +223,20 @@ declare class VirtualBackgroundProcessor {
     private transformer;
     private originalVideoTrack;
     private processedVideoTrack;
+    private fallbackVideoElement;
+    private fallbackInputTrack;
+    private fallbackAnimationFrameId;
+    private isFallbackMode;
     private polyfillsLoaded;
     private polyfillLoadingPromise;
     /**
      * Check if Insertable Streams APIs are available (native or polyfilled)
      */
     private _checkInsertableStreamsSupport;
+    /**
+     * Check if canvas stream based fallback can be used.
+     */
+    private _checkCanvasFallbackSupport;
     /**
      * Get browser compatibility information
      */
@@ -242,6 +254,11 @@ declare class VirtualBackgroundProcessor {
      */
     private _loadScript;
     /**
+     * Create a canvas that works across desktop and mobile browsers.
+     */
+    private _createCanvas;
+    private _createHtmlCanvas;
+    /**
      * Initialize the virtual background processor
      */
     initialize(): Promise<void>;
@@ -257,7 +274,8 @@ declare class VirtualBackgroundProcessor {
      * Start processing video track with virtual background
      * Enhanced to better handle track replacement scenarios
      */
-    startProcessing(videoTrack: MediaStreamTrack): Promise<MediaStreamTrackGenerator>;
+    startProcessing(videoTrack: MediaStreamTrack): Promise<MediaStreamTrack>;
+    private _startCanvasFallbackProcessing;
     /**
      * Stop processing and return to original video track
      * Enhanced cleanup to prevent memory leaks
@@ -523,7 +541,13 @@ declare class ConferenceClient extends EventTarget {
     private screenRecordingStartTime;
     private screenChunkMetadata;
     private screenSegmentsMetadata;
+    private isRecoveringVideoOnForeground;
+    private hasForegroundRecoveryListeners;
     constructor(config: ConferenceConfig);
+    private _isMobileBrowser;
+    private _setupForegroundRecoveryListeners;
+    private _handleAppForeground;
+    private _recoverLocalVideoTrackAfterForeground;
     private decodeJWT;
     private setupPubNub;
     /**
@@ -886,6 +910,7 @@ declare const ConferenceEvents: {
     AUDIO_LEVEL: string;
     VIDEO_MUTED: string;
     VIDEO_UNMUTED: string;
+    LOCAL_VIDEO_RECOVERED: string;
     AUDIO_MUTED: string;
     AUDIO_UNMUTED: string;
     VIDEO_MUTE_FAILED: string;

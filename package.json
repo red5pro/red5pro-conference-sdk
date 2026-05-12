@@ -1,10 +1,10 @@
 {
     "name": "red5pro-conference-sdk",
-    "version": "1.0.3",
+    "version": "1.0.5",
     "description": "Red5 Pro Conference SDK",
     "homepage": "https://www.red5.net",
     "author": "Infrared5 Inc.",
-    "license": "LICENSE",
+    "license": "SEE LICENSE IN LICENSE",
     "main": "index.cjs",
     "module": "index.mjs",
     "types": "index.d.ts",
