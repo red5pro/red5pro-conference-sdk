@@ -5,6 +5,10 @@
     "homepage": "https://www.red5.net",
     "author": "Infrared5 Inc.",
     "license": "SEE LICENSE IN LICENSE",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/red5pro/red5pro-conference-sdk"
+    },
     "main": "index.cjs",
     "module": "index.mjs",
     "types": "index.d.ts",
