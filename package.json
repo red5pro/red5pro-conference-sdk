@@ -25,7 +25,7 @@
         "jszip": "^3.10.1",
         "loglevel": "^1.9.2",
         "pubnub": "^10.2.5",
-        "red5pro-webrtc-sdk": "^15.0.0"
+        "red5pro-webrtc-sdk": "^15.5.0"
     },
     "keywords": [
         "red5",
