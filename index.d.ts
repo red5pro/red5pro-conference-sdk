@@ -307,6 +307,13 @@ declare class VirtualBackgroundProcessor {
     cleanup(): Promise<void>;
 }
 
+interface NoiseSuppressionOptions {
+    /** Suppression strength, 0-100. */
+    level?: number;
+    /** Base URL hosting the DeepFilterNet3 WASM and model files. Defaults to the Mezon CDN. */
+    assetsUrl?: string;
+}
+
 interface MediaConstraintsConfig {
     video: MediaTrackConstraints | boolean;
     audio: MediaTrackConstraints | boolean;
@@ -340,7 +347,7 @@ declare class MediaStreamManager {
     private audioContext;
     private gainNode;
     private highpassFilter;
-    private rnnoiseEnabled;
+    private noiseSuppressor;
     publisherName: string;
     private isVideoMuted;
     private isAudioMuted;
@@ -351,7 +358,7 @@ declare class MediaStreamManager {
     private processedStream;
     private pendingStreamPromise;
     private readonly defaultConstraints;
-    constructor(enableNoiseCancellation?: boolean);
+    constructor(enableNoiseCancellation?: boolean, noiseSuppressionOptions?: NoiseSuppressionOptions);
     /**
      * Initialize virtual background processor
      */
@@ -386,7 +393,23 @@ declare class MediaStreamManager {
      */
     replaceAudioTrack(whipClient: WHIPClient, newAudioTrack: MediaStreamTrack): Promise<void>;
     updateLocalStreamAudioTrack(newAudioTrack: MediaStreamTrack): void;
-    applyRNNoiseProcessing: (inputStream: MediaStream) => Promise<MediaStream>;
+    /**
+     * Route a microphone track through DeepFilterNet3 noise suppression if enabled.
+     * Returns the processed track, or the given track when noise suppression is disabled.
+     */
+    processAudioTrack(audioTrack: MediaStreamTrack): MediaStreamTrack;
+    /**
+     * Return a stream with the same video tracks and the noise suppressed audio track
+     */
+    applyNoiseSuppression(inputStream: MediaStream): MediaStream;
+    /**
+     * Set noise suppression strength (0-100)
+     */
+    setNoiseSuppressionLevel(level: number): void;
+    /**
+     * Stop the microphone track feeding the noise suppressor
+     */
+    stopNoiseSuppressionInput(): void;
     getCurrentStream(): MediaStream | null;
     setOriginalStream(mediaStream: MediaStream): void;
     getOriginalStream(): MediaStream | null;
@@ -439,6 +462,10 @@ interface ConferenceConfig {
     pubnubSubscribeKey?: string;
     analyticsEndpoint?: string | null | undefined;
     enableNoiseCancellation?: boolean;
+    /** DeepFilterNet3 noise suppression strength, 0-100. */
+    noiseSuppressionLevel?: number;
+    /** Base URL hosting the DeepFilterNet3 WASM and model files. Defaults to the Mezon CDN. */
+    noiseSuppressionAssetsUrl?: string;
 }
 interface User {
     uid: string;
