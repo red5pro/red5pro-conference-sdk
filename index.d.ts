@@ -276,6 +276,7 @@ declare class VirtualBackgroundProcessor {
      */
     startProcessing(videoTrack: MediaStreamTrack): Promise<MediaStreamTrack>;
     private _startCanvasFallbackProcessing;
+    getOriginalVideoTrack(): MediaStreamTrack | null;
     /**
      * Stop processing and return to original video track
      * Enhanced cleanup to prevent memory leaks
@@ -318,6 +319,11 @@ interface MediaConstraintsConfig {
     video: MediaTrackConstraints | boolean;
     audio: MediaTrackConstraints | boolean;
 }
+interface VideoResolution {
+    width: number;
+    height: number;
+    frameRate?: number;
+}
 interface DevicePermissions {
     camera: PermissionState;
     microphone: PermissionState;
@@ -357,8 +363,8 @@ declare class MediaStreamManager {
     private isVirtualBackgroundEnabled;
     private processedStream;
     private pendingStreamPromise;
-    private readonly defaultConstraints;
-    constructor(enableNoiseCancellation?: boolean, noiseSuppressionOptions?: NoiseSuppressionOptions);
+    private defaultConstraints;
+    constructor(enableNoiseCancellation?: boolean, noiseSuppressionOptions?: NoiseSuppressionOptions, videoResolution?: VideoResolution);
     /**
      * Initialize virtual background processor
      */
@@ -381,6 +387,23 @@ declare class MediaStreamManager {
      * Get virtual background status
      */
     getVirtualBackgroundStatus(): VirtualBackgroundStatus;
+    /**
+     * Set the camera capture resolution used for new camera tracks (join, unmute,
+     * device switch). The browser picks the closest mode the camera supports.
+     */
+    setVideoResolution({ width, height, frameRate }: VideoResolution): void;
+    getVideoConstraints(): MediaTrackConstraints;
+    /**
+     * The live camera track: the hardware track behind the virtual background when
+     * one is applied, otherwise the current stream's video track.
+     */
+    getCameraTrack(): MediaStreamTrack | null;
+    /**
+     * Change the capture resolution and apply it to the live camera track without
+     * renegotiating. Resolves with the settings the camera actually delivers, which
+     * may be lower than requested.
+     */
+    applyVideoResolution(resolution: VideoResolution): Promise<MediaTrackSettings | null>;
     getMediaConstraints(audio?: boolean, video?: boolean): MediaConstraintsConfig;
     getMediaStream(audio?: boolean, video?: boolean, useBasicConstraints?: boolean): Promise<MediaStream>;
     /**
@@ -466,6 +489,8 @@ interface ConferenceConfig {
     noiseSuppressionLevel?: number;
     /** Base URL hosting the DeepFilterNet3 WASM and model files. Defaults to the Mezon CDN. */
     noiseSuppressionAssetsUrl?: string;
+    /** Camera capture resolution. Defaults to 640x360 at 15 fps. */
+    videoResolution?: VideoResolution;
 }
 interface User {
     uid: string;
@@ -514,7 +539,7 @@ interface SendFileResult {
 declare class ConferenceClient extends EventTarget {
     private statsMonitor;
     mediaStreamManager: MediaStreamManager;
-    config: Required<Omit<ConferenceConfig, 'maxVideoBitrateKbps' | 'statsThresholds'>> & {
+    config: Required<Omit<ConferenceConfig, 'maxVideoBitrateKbps' | 'statsThresholds' | 'videoResolution'>> & {
         maxVideoBitrateKbps?: number;
         statsThresholds?: Record<string, number>;
     };
@@ -1006,4 +1031,4 @@ declare const VirtualBackgroundTypes: {
 declare const version: string;
 
 export { ChatEventTypes, ConferenceClient, ConferenceEvents, LayoutOptions, VirtualBackgroundTypes, version };
-export type { AudioInboundStats, AudioOutboundStats, CandidatePair, CodecInfo, ConferenceConfig, ConnectionAnalysis, ConnectionQuality, ConnectionStats, DetailedConnectionStats, FileType, Issue, IssueReason, IssueSeverity, IssueType, MonitorConfig, MonitorOptions, MonitorThresholds, NetworkQualitySummary, ParsedStats, QualityLevel, StatsAnalysis, TransportStats, User, VideoInboundStats, VideoOutboundStats, VirtualBackgroundStatus };
+export type { AudioInboundStats, AudioOutboundStats, CandidatePair, CodecInfo, ConferenceConfig, ConnectionAnalysis, ConnectionQuality, ConnectionStats, DetailedConnectionStats, FileType, Issue, IssueReason, IssueSeverity, IssueType, MonitorConfig, MonitorOptions, MonitorThresholds, NetworkQualitySummary, ParsedStats, QualityLevel, StatsAnalysis, TransportStats, User, VideoInboundStats, VideoOutboundStats, VideoResolution, VirtualBackgroundStatus };
