@@ -39,10 +39,10 @@
   <p class="subtitle">Join a room and toggle audio / video mute during an active session.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
+    <div><label>Token</label><input id="token" /></div>
   </div>
 
   <div class="row">
@@ -50,7 +50,8 @@
     <button id="btn-leave" disabled>Leave Room</button>
   </div>
 
-  <video id="local-video" autoplay playsinline muted></video>
+  <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+  <video id="red5pro-publisher" autoplay playsinline muted></video>
 
   <div class="row">
     <button class="mute-btn" id="btn-audio" disabled>Mute Audio</button>
@@ -62,15 +63,15 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
     let audioMuted = false;
     let videoMuted = false;
 
@@ -80,6 +81,26 @@
       el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       $('log').appendChild(el);
       $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    // Let the SDK own the local stream so mute/unmute acts on the tracks being published.
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
     }
 
     function syncAudioBadge() {
@@ -114,6 +135,23 @@
       }
     }
 
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      audioMuted = false; videoMuted = false;
+      syncAudioBadge(); syncVideoBadge();
+      $('btn-join').disabled  = false;
+      $('btn-leave').disabled = true;
+      $('btn-audio').disabled = true;
+      $('btn-video').disabled = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
+    }
+
     $('btn-join').addEventListener('click', async () => {
       const host   = $('host').value.trim();
       const roomId = $('room-id').value.trim();
@@ -121,35 +159,41 @@
       const token  = $('token').value.trim();
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+        client.on(ConferenceEvents.USER_PUBLISHED, () => {
           log('Publishing — mute controls are now active', 'success');
-          $('btn-join').disabled  = true;
           $('btn-leave').disabled = false;
           $('btn-audio').disabled = false;
           $('btn-video').disabled = false;
         });
 
-        client.addEventListener(ConferenceEvents.AUDIO_MUTED,   () => { audioMuted = true;  syncAudioBadge(); log('Audio muted'); });
-        client.addEventListener(ConferenceEvents.AUDIO_UNMUTED, () => { audioMuted = false; syncAudioBadge(); log('Audio unmuted'); });
-        client.addEventListener(ConferenceEvents.VIDEO_MUTED,   () => { videoMuted = true;  syncVideoBadge(); log('Video muted'); });
-        client.addEventListener(ConferenceEvents.VIDEO_UNMUTED, () => { videoMuted = false; syncVideoBadge(); log('Video unmuted'); });
-        client.addEventListener(ConferenceEvents.AUDIO_MUTE_FAILED,   e => log(`Audio mute failed: ${e.detail?.message}`, 'error'));
-        client.addEventListener(ConferenceEvents.VIDEO_MUTE_FAILED,   e => log(`Video mute failed: ${e.detail?.message}`, 'error'));
+        client.on(ConferenceEvents.AUDIO_MUTED,   () => { audioMuted = true;  syncAudioBadge(); log('Audio muted'); });
+        client.on(ConferenceEvents.AUDIO_UNMUTED, () => { audioMuted = false; syncAudioBadge(); log('Audio unmuted'); });
 
+        // While publishing, unmuteVideo() reports success as VIDEO_MUTED with { muted: false },
+        // so read the `muted` flag instead of relying on VIDEO_UNMUTED alone.
+        client.on(ConferenceEvents.VIDEO_MUTED, ({ muted }) => {
+          videoMuted = muted !== false;
+          syncVideoBadge();
+          log(videoMuted ? 'Video muted' : 'Video unmuted');
+        });
+        client.on(ConferenceEvents.VIDEO_UNMUTED, () => { videoMuted = false; syncVideoBadge(); log('Video unmuted'); });
+
+        client.on(ConferenceEvents.AUDIO_MUTE_FAILED,   ({ error }) => log(`Audio mute failed: ${error}`, 'error'));
+        client.on(ConferenceEvents.AUDIO_UNMUTE_FAILED, ({ error }) => log(`Audio unmute failed: ${error}`, 'error'));
+        client.on(ConferenceEvents.VIDEO_MUTE_FAILED,   ({ error }) => log(`Video mute failed: ${error}`, 'error'));
+        client.on(ConferenceEvents.VIDEO_UNMUTE_FAILED, ({ error }) => log(`Video unmute failed: ${error}`, 'error'));
+
+        const localStream = await startLocalMedia();
         log('Joining room…');
         await client.join(roomId, userId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
@@ -166,6 +210,8 @@
     $('btn-video').addEventListener('click', async () => {
       if (!client) return;
       try {
+        // muteVideo() stops the camera (the light turns off) and sends black frames;
+        // unmuteVideo() reacquires the camera and updates #red5pro-publisher.
         if (videoMuted) await client.unmuteVideo();
         else            await client.muteVideo();
       } catch (err) {
@@ -176,15 +222,9 @@
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null;
-        audioMuted = false; videoMuted = false;
-        syncAudioBadge(); syncVideoBadge();
-        $('btn-join').disabled  = false;
-        $('btn-leave').disabled = true;
-        $('btn-audio').disabled = true;
-        $('btn-video').disabled = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

@@ -46,9 +46,10 @@
   <p class="subtitle">Record the local camera stream and download it as a WebM file or ZIP archive.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token</label><input id="token" /></div>
     <div>
       <label>MIME type</label>
       <select id="mime">
@@ -65,7 +66,8 @@
     <button id="btn-leave" disabled>Leave Room</button>
   </div>
 
-  <video id="local-video" autoplay playsinline muted></video>
+  <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+  <video id="red5pro-publisher" autoplay playsinline muted></video>
 
   <div id="rec-status">
     <div class="dot" id="rec-dot"></div>
@@ -86,17 +88,21 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
-    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
+    // The script-tag (UMD) build needs setImmediate for ZIP generation; browsers don't provide it.
+    window.setImmediate = window.setImmediate || ((fn, ...args) => setTimeout(fn, 0, ...args));
 
+    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
     let isRecording = false;
     let isPaused = false;
+    let recordingStartedAt = 0;
     let statsTimer = null;
 
     function log(msg, type = 'info') {
@@ -107,6 +113,25 @@
       $('log').scrollTop = $('log').scrollHeight;
     }
 
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
+    }
+
     function formatBytes(b) {
       if (b < 1024) return `${b} B`;
       if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
@@ -115,37 +140,62 @@
 
     function updateStats() {
       if (!client) return;
+      // { isRecording, isPaused, chunks, segments, estimatedSize, state }
       const s = client.getLocalRecordingStatus();
       $('s-chunks').textContent = s.chunks;
-      $('s-size').textContent   = formatBytes(s.totalSize);
-      $('s-dur').textContent    = s.startTime ? `${Math.floor((Date.now() - s.startTime) / 1000)}s` : '0s';
+      $('s-size').textContent   = formatBytes(s.estimatedSize);
+      $('s-dur').textContent    = recordingStartedAt ? `${Math.floor((Date.now() - recordingStartedAt) / 1000)}s` : '0s';
+    }
+
+    function resetUi() {
+      clearInterval(statsTimer);
+      $('red5pro-publisher').srcObject = null;
+      isRecording = false; isPaused = false; recordingStartedAt = 0;
+      $('rec-dot').classList.remove('active');
+      $('rec-label').textContent = 'Idle';
+      $('btn-join').disabled     = false;
+      $('btn-leave').disabled    = true;
+      $('btn-record').disabled   = true;
+      $('btn-pause').disabled    = true;
+      $('btn-download').disabled = true;
+      $('btn-record').textContent = 'Start Recording';
+      $('btn-record').classList.remove('recording');
+      $('btn-pause').textContent = 'Pause';
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
     }
 
     $('btn-join').addEventListener('click', async () => {
       const host   = $('host').value.trim();
       const roomId = $('room-id').value.trim();
       const userId = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token  = $('token').value.trim();
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+        client.on(ConferenceEvents.USER_PUBLISHED, () => {
           log('Publishing — recorder ready', 'success');
-          $('btn-join').disabled   = true;
           $('btn-leave').disabled  = false;
           $('btn-record').disabled = false;
         });
 
-        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_STARTED, () => {
-          log('Recording started', 'success');
+        // Informational: the room has local recording turned on. The SDK does not
+        // enforce this flag; your app decides whether to offer recording.
+        client.on(ConferenceEvents.LOCAL_RECORDING_ENABLED, () => log('Local recording is enabled for this room'));
+
+        client.on(ConferenceEvents.LOCAL_RECORDING_STARTED, ({ mimeType }) => {
+          log(`Recording started (${mimeType})`, 'success');
+          recordingStartedAt = Date.now();
           $('rec-dot').classList.add('active');
           $('rec-label').textContent = 'Recording';
           $('btn-pause').disabled    = false;
@@ -153,8 +203,8 @@
           statsTimer = setInterval(updateStats, 500);
         });
 
-        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_STOPPED, () => {
-          log('Recording stopped');
+        client.on(ConferenceEvents.LOCAL_RECORDING_STOPPED, ({ size }) => {
+          log(`Recording stopped (${formatBytes(size)})`);
           $('rec-dot').classList.remove('active');
           $('rec-label').textContent = 'Stopped';
           $('btn-pause').disabled = true;
@@ -162,7 +212,7 @@
           updateStats();
         });
 
-        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_PAUSED, () => {
+        client.on(ConferenceEvents.LOCAL_RECORDING_PAUSED, () => {
           log('Recording paused');
           $('rec-dot').classList.remove('active');
           $('rec-label').textContent = 'Paused';
@@ -170,7 +220,7 @@
           isPaused = true;
         });
 
-        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_RESUMED, () => {
+        client.on(ConferenceEvents.LOCAL_RECORDING_RESUMED, () => {
           log('Recording resumed');
           $('rec-dot').classList.add('active');
           $('rec-label').textContent = 'Recording';
@@ -178,31 +228,41 @@
           isPaused = false;
         });
 
-        client.addEventListener(ConferenceEvents.LOCAL_RECORDING_ERROR, e => {
-          log(`Recording error: ${e.detail?.message || 'unknown'}`, 'error');
+        client.on(ConferenceEvents.LOCAL_RECORDING_DOWNLOADED, ({ filename, size }) => {
+          log(`Downloaded ${filename} (${formatBytes(size)})`, 'success');
         });
 
+        client.on(ConferenceEvents.LOCAL_RECORDING_ERROR, ({ error }) => {
+          log(`Recording error: ${error?.message || error}`, 'error');
+        });
+
+        const localStream = await startLocalMedia();
         log('Joining room…');
-        await client.join(roomId, userId, '', 'publisher', localStream, true, true);
+        await client.join(roomId, userId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-record').addEventListener('click', () => {
-      if (!client || !localStream) return;
+      if (!client) return;
       if (isRecording) {
         client.stopLocalRecording();
         isRecording = false;
+        isPaused = false;
         $('btn-record').textContent = 'Start Recording';
         $('btn-record').classList.remove('recording');
-        $('btn-pause').disabled = true;
+        $('btn-pause').textContent = 'Pause';
       } else {
+        // Passing no stream records the SDK's current local stream, so a camera switch or
+        // video mute starts a new segment instead of stopping the recording.
         const mime = $('mime').value || undefined;
-        client.startLocalRecording(localStream, 1000, mime);
-        isRecording = true;
-        $('btn-record').textContent = 'Stop Recording';
-        $('btn-record').classList.add('recording');
+        client.startLocalRecording(undefined, 1000, mime);
+        isRecording = client.getLocalRecordingStatus().isRecording;
+        if (isRecording) {
+          $('btn-record').textContent = 'Stop Recording';
+          $('btn-record').classList.add('recording');
+        }
       }
     });
 
@@ -216,30 +276,22 @@
       if (!client) return;
       try {
         log('Generating ZIP download…');
+        // The ZIP holds recording.webm (or part1.webm, part2.webm… if the camera changed),
+        // a JSON chunk index per file, and screen-recording-N.webm for any screen share.
         const ok = await client.downloadLocalRecording('my-recording');
-        if (ok) log('Download started', 'success');
-        else    log('No recording data to download', 'error');
+        if (!ok) log('No recording data to download', 'error');
       } catch (err) {
         log(`Download error: ${err.message}`, 'error');
       }
     });
 
     $('btn-leave').addEventListener('click', async () => {
-      clearInterval(statsTimer);
       try {
-        if (isRecording) client.stopLocalRecording();
+        // leave() stops an active recording; download first if you want to keep it.
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null; isRecording = false; isPaused = false;
-        $('rec-dot').classList.remove('active');
-        $('rec-label').textContent = 'Idle';
-        $('btn-join').disabled   = false;
-        $('btn-leave').disabled  = true;
-        $('btn-record').disabled = true;
-        $('btn-pause').disabled  = true;
-        $('btn-record').textContent = 'Start Recording';
-        $('btn-record').classList.remove('recording');
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

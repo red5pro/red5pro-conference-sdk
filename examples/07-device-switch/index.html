@@ -40,10 +40,10 @@
   <p class="subtitle">Switch between available cameras and microphones mid-session without reconnecting.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
+    <div><label>Token</label><input id="token" /></div>
   </div>
 
   <div class="row">
@@ -51,7 +51,8 @@
     <button id="btn-leave" disabled>Leave Room</button>
   </div>
 
-  <video id="local-video" autoplay playsinline muted></video>
+  <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+  <video id="red5pro-publisher" autoplay playsinline muted></video>
 
   <div id="device-panel">
     <h3>Switch Devices</h3>
@@ -69,15 +70,15 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
 
     function log(msg, type = 'info') {
       const el = document.createElement('div');
@@ -87,29 +88,67 @@
       $('log').scrollTop = $('log').scrollHeight;
     }
 
-    async function enumerateDevices() {
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
+    }
+
+    async function enumerateDevices(localStream) {
+      // Device labels are only filled in after camera/mic permission has been granted.
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cameras = devices.filter(d => d.kind === 'videoinput');
       const mics    = devices.filter(d => d.kind === 'audioinput');
+      const currentCamera = localStream.getVideoTracks()[0]?.getSettings().deviceId;
+      const originalMic   = client.mediaStreamManager.getOriginalStream()?.getAudioTracks()[0]?.getSettings().deviceId;
 
-      const camSel = $('sel-camera');
-      camSel.innerHTML = cameras.map((d, i) =>
-        `<option value="${d.deviceId}">${d.label || `Camera ${i + 1}`}</option>`
+      $('sel-camera').innerHTML = cameras.map((d, i) =>
+        `<option value="${d.deviceId}" ${d.deviceId === currentCamera ? 'selected' : ''}>${d.label || `Camera ${i + 1}`}</option>`
       ).join('');
-
-      const micSel = $('sel-mic');
-      micSel.innerHTML = mics.map((d, i) =>
-        `<option value="${d.deviceId}">${d.label || `Microphone ${i + 1}`}</option>`
+      $('sel-mic').innerHTML = mics.map((d, i) =>
+        `<option value="${d.deviceId}" ${d.deviceId === originalMic ? 'selected' : ''}>${d.label || `Microphone ${i + 1}`}</option>`
       ).join('');
 
       log(`Found ${cameras.length} camera(s), ${mics.length} microphone(s)`);
+
       $('sel-camera').disabled = false;
       $('sel-mic').disabled    = false;
       $('btn-camera').disabled = cameras.length < 2;
       $('btn-mic').disabled    = mics.length < 2;
+      if (cameras.length < 2) log('Only one camera found — switch unavailable');
+      if (mics.length < 2)    log('Only one mic found — switch unavailable');
+    }
 
-      if (cameras.length < 2) log('Only one camera found — switch unavailable', 'info');
-      if (mics.length < 2)    log('Only one mic found — switch unavailable', 'info');
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      $('sel-camera').innerHTML = '<option>— enumerate after join —</option>';
+      $('sel-mic').innerHTML    = '<option>— enumerate after join —</option>';
+      $('sel-camera').disabled  = true;
+      $('sel-mic').disabled     = true;
+      $('btn-camera').disabled  = true;
+      $('btn-mic').disabled     = true;
+      $('btn-join').disabled    = false;
+      $('btn-leave').disabled   = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
     }
 
     $('btn-join').addEventListener('click', async () => {
@@ -119,27 +158,24 @@
       const token  = $('token').value.trim();
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
+        const localStream = await startLocalMedia();
 
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, async () => {
+        client.on(ConferenceEvents.USER_PUBLISHED, async () => {
           log('Publishing', 'success');
-          $('btn-join').disabled  = true;
           $('btn-leave').disabled = false;
-          await enumerateDevices();
+          await enumerateDevices(localStream);
         });
 
         log('Joining room…');
         await client.join(roomId, userId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
@@ -148,6 +184,9 @@
       if (!client || !deviceId) return;
       try {
         log(`Switching camera to: ${$('sel-camera').selectedOptions[0]?.text}…`);
+        // Replaces the track on the live connection (no renegotiation) and in the local
+        // stream shown by #red5pro-publisher. Re-applies an active virtual background.
+        // While video is muted it only remembers the device for the next unmute.
         await client.switchVideoDeviceWithTrackReplacement(deviceId);
         log('Camera switched', 'success');
       } catch (err) {
@@ -160,12 +199,9 @@
       if (!client || !deviceId) return;
       try {
         log(`Switching microphone to: ${$('sel-mic').selectedOptions[0]?.text}…`);
-        const newStream = await navigator.mediaDevices.getUserMedia({
-          audio: { deviceId: { exact: deviceId } },
-          video: false
-        });
-        const newAudioTrack = newStream.getAudioTracks()[0];
-        await client.mediaStreamManager.replaceAudioTrack(client._whipClient, newAudioTrack);
+        // Routes the new microphone through noise suppression (when enabled) and replaces
+        // the audio track on the live connection.
+        await client.switchAudioDeviceWithTrackReplacement(deviceId);
         log('Microphone switched', 'success');
       } catch (err) {
         log(`Microphone switch failed: ${err.message}`, 'error');
@@ -175,17 +211,9 @@
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null;
-        $('sel-camera').innerHTML = '<option>— enumerate after join —</option>';
-        $('sel-mic').innerHTML    = '<option>— enumerate after join —</option>';
-        $('sel-camera').disabled  = true;
-        $('sel-mic').disabled     = true;
-        $('btn-camera').disabled  = true;
-        $('btn-mic').disabled     = true;
-        $('btn-join').disabled    = false;
-        $('btn-leave').disabled   = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

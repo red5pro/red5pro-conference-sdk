@@ -50,10 +50,10 @@
   <p class="subtitle">Apply blur, color, or image backgrounds to your camera using MediaPipe segmentation. Requires Chrome/Edge 94+.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
+    <div><label>Token</label><input id="token" /></div>
   </div>
 
   <div class="row">
@@ -61,7 +61,8 @@
     <button id="btn-leave" disabled>Leave Room</button>
   </div>
 
-  <video id="local-video" autoplay playsinline muted></video>
+  <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+  <video id="red5pro-publisher" autoplay playsinline muted></video>
 
   <div id="bg-panel">
     <h3>Virtual Background</h3>
@@ -88,16 +89,24 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
-    let client      = null;
-    let localStream = null;
-    let currentType = 'none';
+    const $ = id => document.getElementById(id);
+    let client = null;
+
+    // The processor understands 'blur', 'image', 'color' and 'none'.
+    // "Slight blur" is just 'blur' with a smaller blurAmount (in pixels).
+    const BACKGROUNDS = {
+      'slight-blur': () => ({ type: 'blur',  options: { blurAmount: 10 } }),
+      'blur':        () => ({ type: 'blur',  options: { blurAmount: 50 } }),
+      'color':       () => ({ type: 'color', options: { color: $('color-picker').value } }),
+      'image':       () => ({ type: 'image', options: { imageUrl: $('image-url').value } })
+    };
 
     function log(msg, type = 'info') {
       const el = document.createElement('div');
@@ -105,6 +114,25 @@
       el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       $('log').appendChild(el);
       $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
     }
 
     function setStatus(msg) { $('status').textContent = msg; }
@@ -116,19 +144,23 @@
       $('opt-image').classList.toggle('visible', type === 'image');
     }
 
-    async function applyBackground(type) {
+    async function applyBackground(choice) {
       if (!client) return;
       try {
-        const options = {};
-        if (type === 'color') options.color = $('color-picker').value;
-        if (type === 'image') options.imageUrl = $('image-url').value;
-
-        if (type === 'none') {
+        if (choice === 'none') {
           await client.disableVirtualBackground();
-        } else if (currentType === 'none') {
-          await client.enableVirtualBackground(type, options);
-        } else {
+          return;
+        }
+        const { type, options } = BACKGROUNDS[choice]();
+        if (type === 'image' && !options.imageUrl) {
+          log('Enter an image URL first (the image host must allow CORS)', 'error');
+          return;
+        }
+        // The SDK swaps the processed track into the publisher and #red5pro-publisher.
+        if (client.getVirtualBackgroundStatus().isEnabled) {
           await client.changeVirtualBackground(type, options);
+        } else {
+          await client.enableVirtualBackground(type, options);
         }
       } catch (err) {
         log(`Background error: ${err.message}`, 'error');
@@ -137,11 +169,27 @@
 
     document.querySelectorAll('.bg-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        const type = btn.dataset.type;
-        selectBtn(type);
-        applyBackground(type);
+        const choice = btn.dataset.type;
+        selectBtn(choice);
+        applyBackground(choice);
       });
     });
+
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      document.querySelectorAll('.bg-btn').forEach(b => b.disabled = true);
+      selectBtn('none');
+      setStatus('Not initialized');
+      $('btn-join').disabled  = false;
+      $('btn-leave').disabled = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
+    }
 
     $('btn-join').addEventListener('click', async () => {
       const host   = $('host').value.trim();
@@ -150,78 +198,67 @@
       const token  = $('token').value.trim();
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, async () => {
+        client.on(ConferenceEvents.USER_PUBLISHED, async () => {
           log('Publishing — initializing virtual background…');
-          $('btn-join').disabled  = true;
           $('btn-leave').disabled = false;
           try {
+            // Optional: enableVirtualBackground() initializes on first use, but doing it
+            // up front loads the segmentation model before the user picks a background.
             await client.initializeVirtualBackground();
           } catch (err) {
             log(`VB init failed: ${err.message}`, 'error');
           }
         });
 
-        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_INITIALIZED, () => {
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_INITIALIZED, () => {
           log('Virtual background initialized', 'success');
           setStatus('Ready — select a background below');
           document.querySelectorAll('.bg-btn').forEach(b => b.disabled = false);
         });
 
-        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_ENABLED, e => {
-          currentType = e.detail?.type || 'blur';
-          log(`Background enabled: ${currentType}`, 'success');
-          setStatus(`Active: ${currentType}`);
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_ENABLED, ({ type }) => {
+          log(`Background enabled: ${type}`, 'success');
+          setStatus(`Active: ${type}`);
         });
 
-        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_DISABLED, () => {
-          currentType = 'none';
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_CHANGED, ({ type }) => {
+          log(`Background changed to: ${type}`, 'success');
+          setStatus(`Active: ${type}`);
+        });
+
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_DISABLED, () => {
           log('Background disabled');
           setStatus('No background');
         });
 
-        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_CHANGED, e => {
-          currentType = e.detail?.type || currentType;
-          log(`Background changed to: ${currentType}`, 'success');
-          setStatus(`Active: ${currentType}`);
-        });
-
-        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_ENABLE_FAILED, e => {
-          log(`Enable failed: ${e.detail?.message}`, 'error');
-        });
-
-        client.addEventListener(ConferenceEvents.VIRTUAL_BACKGROUND_INIT_FAILED, e => {
-          log(`Init failed: ${e.detail?.message}`, 'error');
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_ENABLE_FAILED,  ({ error }) => log(`Enable failed: ${error}`, 'error'));
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_CHANGE_FAILED,  ({ error }) => log(`Change failed: ${error}`, 'error'));
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_DISABLE_FAILED, ({ error }) => log(`Disable failed: ${error}`, 'error'));
+        client.on(ConferenceEvents.VIRTUAL_BACKGROUND_INIT_FAILED, ({ error }) => {
+          log(`Init failed: ${error}`, 'error');
           setStatus('Initialization failed — Chrome/Edge 94+ required');
         });
 
+        const localStream = await startLocalMedia();
         log('Joining room…');
         await client.join(roomId, userId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null; currentType = 'none';
-        document.querySelectorAll('.bg-btn').forEach(b => b.disabled = true);
-        selectBtn('none');
-        setStatus('Not initialized');
-        $('btn-join').disabled  = false;
-        $('btn-leave').disabled = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

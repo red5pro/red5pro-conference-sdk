@@ -52,9 +52,10 @@
   <p class="subtitle">Monitor real-time WebRTC connection quality: bitrate, RTT, packet loss, and jitter.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
+    <div><label>Token</label><input id="token" /></div>
     <div>
       <label>Poll interval (ms)</label>
       <input type="number" id="poll-interval" value="2000" min="500" />
@@ -68,7 +69,8 @@
     <button id="btn-leave" disabled>Leave Room</button>
   </div>
 
-  <video id="local-video" autoplay playsinline muted></video>
+  <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+  <video id="red5pro-publisher" autoplay playsinline muted></video>
 
   <div id="quality-bar">
     <h3>Overall Network Quality</h3>
@@ -109,15 +111,16 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
+    let myUserId = '';
 
     function log(msg, type = 'info') {
       const el = document.createElement('div');
@@ -125,6 +128,25 @@
       el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       $('log').appendChild(el);
       $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
     }
 
     function quality(val, warnThr, badThr, invert = false) {
@@ -139,104 +161,113 @@
       el.className = `value ${cls}`;
     }
 
+    // Quality scores are 1 (critical) to 5 (excellent); 0 means no connection of that kind yet.
     function updateQualityBar(score) {
+      const pct = Math.round((score / 5) * 100);
       const fill = $('quality-fill');
-      fill.style.width = `${score}%`;
-      fill.style.background = score > 70 ? '#3fb950' : score > 40 ? '#f0883e' : '#f85149';
+      fill.style.width = `${pct}%`;
+      fill.style.background = pct > 70 ? '#3fb950' : pct > 40 ? '#f0883e' : '#f85149';
+    }
+
+    function renderIssues(issues) {
+      if (!issues.length) {
+        $('issues-box').style.display = 'none';
+        return;
+      }
+      $('issues-box').style.display = '';
+      $('issues-list').innerHTML = issues
+        .map(i => `<div>• [${i.statsSample.severity}] ${i.statsSample.connectionId}: ${i.statsSample.description}</div>`)
+        .join('');
+    }
+
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      ['s-bitrate','s-rtt','s-loss','s-jitter','s-fps','s-packets'].forEach(id => {
+        $(id).innerHTML = '—'; $(id).className = 'value';
+      });
+      updateQualityBar(0);
+      $('issues-box').style.display = 'none';
+      $('btn-join').disabled  = false;
+      $('btn-leave').disabled = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
     }
 
     $('btn-join').addEventListener('click', async () => {
       const host     = $('host').value.trim();
       const roomId   = $('room-id').value.trim();
-      const userId   = $('user-id').value.trim() || `user-${Date.now()}`;
+      const token    = $('token').value.trim();
       const interval = parseInt($('poll-interval').value, 10) || 2000;
       const thLoss   = parseFloat($('th-loss').value) || 5;
       const thRtt    = parseFloat($('th-rtt').value) || 200;
+      myUserId       = $('user-id').value.trim() || `user-${Date.now()}`;
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
-
         client = new ConferenceClient({
           host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
           statsPollingInterval: interval,
           packetLossThreshold:  thLoss,
           rttThreshold:         thRtt
         });
+        watchJoinFailures(handleJoinFailure);
 
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+        // Stats collection starts automatically once the publisher connection is up.
+        client.on(ConferenceEvents.USER_PUBLISHED, () => {
           log('Publishing — stats monitoring active', 'success');
-          $('btn-join').disabled  = true;
           $('btn-leave').disabled = false;
         });
 
-        client.addEventListener(ConferenceEvents.NETWORK_SCORES_UPDATED, e => {
-          const scores = e.detail;
-          if (!scores) return;
-          const score = scores.overall ?? scores.score ?? 100;
-          updateQualityBar(score);
+        // Every poll: { inbound, outbound, statsSamples: { [connectionId]: sample } }.
+        // Connection ids are stream names, so the publisher's id is your userId.
+        client.on(ConferenceEvents.NETWORK_SCORES_UPDATED, ({ outbound, statsSamples }) => {
+          updateQualityBar(outbound);
+
+          const mine = statsSamples[myUserId];
+          if (!mine) return;
+          const kbps = mine.bitrate / 1000;           // bitrate is bits per second
+          setStat('s-bitrate', Math.round(kbps),          quality(kbps, 500, 100), 'kbps');
+          setStat('s-rtt',     Math.round(mine.rtt),      quality(mine.rtt, thRtt / 2, thRtt, true), 'ms');
+          setStat('s-loss',    mine.packetLossPct.toFixed(1), quality(mine.packetLossPct, thLoss / 2, thLoss, true), '%');
+          setStat('s-jitter',  Math.round(mine.avgJitter), quality(mine.avgJitter, 25, 50, true), 'ms');
+          setStat('s-fps',     Math.round(mine.framesPerSecond || 0), quality(mine.framesPerSecond, 20, 10), 'fps');
+
+          // Raw RTCStats-derived values are available per connection.
+          const packets = client.getConnectionStats(myUserId).current?.outboundVideo?.packetsSent;
+          if (packets !== undefined) setStat('s-packets', packets.toLocaleString(), 'good');
+
+          // Clear the panel once the monitor no longer reports any issues.
+          if (!client.getCurrentWebRTCIssues().length) renderIssues([]);
         });
 
-        client.addEventListener(ConferenceEvents.STATS_ANALYZED, e => {
-          const stats = e.detail;
-          if (!stats) return;
-
-          const bitrate = stats.outboundBitrateKbps ?? stats.bitrate;
-          const rtt     = stats.roundTripTime       ?? stats.rtt;
-          const loss    = stats.packetLossPercent   ?? stats.packetLoss;
-          const jitter  = stats.jitter;
-          const fps     = stats.framesPerSecond      ?? stats.frameRate;
-          const pkts    = stats.packetsSent;
-
-          if (bitrate !== undefined) setStat('s-bitrate', Math.round(bitrate), quality(bitrate, 500, 100), 'kbps');
-          if (rtt     !== undefined) setStat('s-rtt',     Math.round(rtt),     quality(rtt,     thRtt/2, thRtt, true), 'ms');
-          if (loss    !== undefined) setStat('s-loss',    loss.toFixed(1),      quality(loss,    thLoss/2, thLoss, true), '%');
-          if (jitter  !== undefined) setStat('s-jitter',  Math.round(jitter),  quality(jitter,  25, 50, true), 'ms');
-          if (fps     !== undefined) setStat('s-fps',     Math.round(fps),      quality(fps, 20, 10), 'fps');
-          if (pkts    !== undefined) setStat('s-packets', pkts.toLocaleString(), 'good', '');
+        // Only emitted when something is wrong: [{ type, reason, statsSample: { connectionId,
+        // value, threshold, description, severity } }]
+        client.on(ConferenceEvents.WEBRTC_ISSUES_DETECTED, issues => {
+          renderIssues(issues);
+          log(`Issues detected: ${issues.map(i => i.reason).join(', ')}`, 'error');
         });
 
-        client.addEventListener(ConferenceEvents.WEBRTC_ISSUES_DETECTED, e => {
-          const issues = e.detail;
-          if (!issues || !issues.length) {
-            $('issues-box').style.display = 'none';
-            return;
-          }
-          $('issues-box').style.display = '';
-          $('issues-list').innerHTML = issues.map(i => `<div>• ${typeof i === 'string' ? i : JSON.stringify(i)}</div>`).join('');
-          log(`Issues detected: ${issues.length}`, 'warn');
-        });
-
-        client.addEventListener(ConferenceEvents.ISSUES_DETECTED, e => {
-          const issues = e.detail;
-          if (Array.isArray(issues) && issues.length) {
-            log(`Connection issue: ${issues.map(i => i.type || i).join(', ')}`, 'warn');
-          }
-        });
-
+        const localStream = await startLocalMedia();
         log('Joining room…');
-        await client.join(roomId, userId, '', 'publisher', localStream, true, true);
+        await client.join(roomId, myUserId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null;
-        ['s-bitrate','s-rtt','s-loss','s-jitter','s-fps','s-packets'].forEach(id => {
-          $(id).innerHTML = '—'; $(id).className = 'value';
-        });
-        updateQualityBar(0);
-        $('issues-box').style.display = 'none';
-        $('btn-join').disabled  = false;
-        $('btn-leave').disabled = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

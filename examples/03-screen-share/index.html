@@ -44,14 +44,18 @@
   <p class="subtitle">Join a room, then start/stop sharing your screen as a second stream.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
+    <div><label>Token</label><input id="token" /></div>
   </div>
 
   <div id="options">
     <h3>Screen Share Options</h3>
+    <div class="opt-row">
+      <label>Screen share token</label>
+      <input type="text" id="screen-token" placeholder="Token for &lt;userId&gt;-screenshare (if required)" />
+    </div>
     <div class="opt-row">
       <label>Include audio</label>
       <input type="checkbox" id="opt-audio" checked />
@@ -78,26 +82,28 @@
 
   <div class="videos">
     <div class="video-tile">
-      <video id="camera-video" autoplay playsinline muted></video>
+      <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+      <video id="red5pro-publisher" autoplay playsinline muted></video>
       <div class="label">Camera</div>
     </div>
     <div class="video-tile" id="screen-tile" style="display:none">
-      <video id="screen-video" autoplay playsinline muted></video>
+      <!-- REQUIRED for screen share: the SDK previews the shared screen into this element. -->
+      <video id="red5pro-publisher-screenshare" autoplay playsinline muted></video>
       <div class="label">Screen</div>
     </div>
   </div>
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
     let sharing = false;
 
     function log(msg, type = 'info') {
@@ -108,6 +114,48 @@
       $('log').scrollTop = $('log').scrollHeight;
     }
 
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
+    }
+
+    function showSharing(active) {
+      sharing = active;
+      $('btn-screen').textContent = active ? 'Stop Screen Share' : 'Start Screen Share';
+      $('btn-screen').classList.toggle('active', active);
+      $('screen-tile').style.display = active ? '' : 'none';
+    }
+
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      $('red5pro-publisher-screenshare').srcObject = null;
+      showSharing(false);
+      $('btn-join').disabled   = false;
+      $('btn-leave').disabled  = true;
+      $('btn-screen').disabled = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
+    }
+
     $('btn-join').addEventListener('click', async () => {
       const host   = $('host').value.trim();
       const roomId = $('room-id').value.trim();
@@ -115,52 +163,45 @@
       const token  = $('token').value.trim();
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('camera-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+        client.on(ConferenceEvents.USER_PUBLISHED, () => {
           log('Publishing camera', 'success');
-          $('btn-join').disabled   = true;
           $('btn-leave').disabled  = false;
           $('btn-screen').disabled = false;
         });
 
-        client.addEventListener(ConferenceEvents.SCREEN_SHARE_STARTED, e => {
-          log('Screen share started', 'success');
-          sharing = true;
-          $('btn-screen').textContent = 'Stop Screen Share';
-          $('btn-screen').classList.add('active');
-          const stream = e.detail?.stream || e.detail;
-          if (stream) {
-            $('screen-video').srcObject = stream;
-            $('screen-tile').style.display = '';
-          }
+        // Fires once when the screen stream is published ({ streamName, stream }) and again
+        // when the server accepts it into the room ({ uid }). The SDK renders the preview
+        // into #red5pro-publisher-screenshare itself.
+        client.on(ConferenceEvents.SCREEN_SHARE_STARTED, ({ streamName, uid }) => {
+          if (!sharing) log(`Screen share started as ${streamName || uid}`, 'success');
+          showSharing(true);
         });
 
-        client.addEventListener(ConferenceEvents.SCREEN_SHARE_STOPPED, () => {
+        // Also fires when the user clicks the browser's own "Stop sharing" button.
+        client.on(ConferenceEvents.SCREEN_SHARE_STOPPED, () => {
           log('Screen share stopped');
-          sharing = false;
-          $('btn-screen').textContent = 'Start Screen Share';
-          $('btn-screen').classList.remove('active');
-          $('screen-video').srcObject = null;
-          $('screen-tile').style.display = 'none';
+          $('red5pro-publisher-screenshare').srcObject = null;
+          showSharing(false);
         });
 
-        client.addEventListener(ConferenceEvents.SCREEN_SHARE_FAILED, e => {
-          log(`Screen share failed: ${e.detail?.message || 'unknown'}`, 'error');
+        // startScreenShare() reports most failures (including a cancelled picker) here
+        // instead of rejecting.
+        client.on(ConferenceEvents.SCREEN_SHARE_FAILED, ({ error }) => {
+          log(`Screen share failed: ${error}`, 'error');
+          showSharing(false);
         });
 
+        const localStream = await startLocalMedia();
         log('Joining room…');
         await client.join(roomId, userId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
@@ -171,6 +212,9 @@
           await client.stopScreenShare();
         } else {
           await client.startScreenShare({
+            // The screen share joins the room as its own participant, "<userId>-screenshare".
+            // If your deployment enforces tokens, pass a token issued for that uid.
+            token: $('screen-token').value.trim(),
             includeAudio: $('opt-audio').checked,
             width:  parseInt($('opt-width').value,  10),
             height: parseInt($('opt-height').value, 10),
@@ -184,17 +228,11 @@
 
     $('btn-leave').addEventListener('click', async () => {
       try {
+        // leave() also stops an active screen share.
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('camera-video').srcObject = null;
-        $('screen-video').srcObject = null;
-        $('screen-tile').style.display = 'none';
-        client = null; localStream = null; sharing = false;
-        $('btn-screen').textContent = 'Start Screen Share';
-        $('btn-screen').classList.remove('active');
-        $('btn-join').disabled   = false;
-        $('btn-leave').disabled  = true;
-        $('btn-screen').disabled = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

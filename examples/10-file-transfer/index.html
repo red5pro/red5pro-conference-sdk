@@ -50,21 +50,24 @@
 </head>
 <body>
   <h1>10 – File Transfer</h1>
-  <p class="subtitle">Send and receive files between conference participants using PubNub file sharing. Requires PubNub keys.</p>
+  <p class="subtitle">Send and receive files between conference participants using PubNub file sharing. Requires PubNub: a token that carries PubNub credentials, or PubNub keys.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID</label><input id="user-id" placeholder="alice" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
-    <div><label>PubNub Publish Key</label><input id="pn-pub" placeholder="pub-c-…" /></div>
-    <div><label>PubNub Subscribe Key</label><input id="pn-sub" placeholder="sub-c-…" /></div>
+    <div><label>Token</label><input id="token" /></div>
+    <div><label>PubNub Publish Key (used only without a token)</label><input id="pn-pub" placeholder="pub-c-…" /></div>
+    <div><label>PubNub Subscribe Key (used only without a token)</label><input id="pn-sub" placeholder="sub-c-…" /></div>
   </div>
 
   <div class="row">
     <button id="btn-join">Join Room</button>
     <button id="btn-leave" disabled>Leave Room</button>
   </div>
+
+  <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+  <video id="red5pro-publisher" autoplay playsinline muted style="width:160px;height:90px;background:#161b22;border-radius:8px;margin-bottom:16px;"></video>
 
   <div class="send-area" id="drop-zone">
     <input type="file" id="file-input" multiple />
@@ -86,15 +89,16 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
+    let myUserId = '';
     let selectedFiles = [];
 
     function log(msg, type = 'info') {
@@ -103,6 +107,26 @@
       el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       $('log').appendChild(el);
       $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    // Audio-only: the SDK still needs #red5pro-publisher, where it previews placeholder video.
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const micStream = await media.getMediaStream(true, false);
+      media.setOriginalStream(micStream);
+      media.setCurrentStream(micStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
     }
 
     function formatBytes(b) {
@@ -116,6 +140,18 @@
       $('progress-fill').style.width = `${pct}%`;
     }
 
+    async function download(id, name) {
+      // downloadFile() resolves to a PubNub file object (not a Blob); convert it first.
+      const file = await client.downloadFile(id, name);
+      if (!file) throw new Error('File not available');
+      const blob = await file.toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    // listFiles() returns [{ id, name, size, created }]
     function renderFileList(files) {
       const list = $('file-list');
       if (!files || files.length === 0) {
@@ -128,25 +164,19 @@
         item.className = 'file-item';
         item.innerHTML = `
           <div class="info">
-            <div class="name">${f.name}</div>
-            <div class="meta">${formatBytes(f.size)} · ID: ${f.id}</div>
+            <div class="name"></div>
+            <div class="meta"></div>
           </div>
-          <button class="dl-btn" data-id="${f.id}" data-name="${f.name}">Download</button>`;
-        list.appendChild(item);
-      });
-
-      list.querySelectorAll('.dl-btn').forEach(btn => {
+          <button class="dl-btn">Download</button>`;
+        item.querySelector('.name').textContent = f.name;
+        item.querySelector('.meta').textContent = `${formatBytes(f.size)} · ID: ${f.id}`;
+        const btn = item.querySelector('.dl-btn');
         btn.addEventListener('click', async () => {
           btn.disabled = true;
           btn.textContent = '…';
           try {
-            const blob = await client.downloadFile(btn.dataset.id, btn.dataset.name);
-            if (!blob) throw new Error('Empty response');
-            const url = URL.createObjectURL(blob);
-            const a   = document.createElement('a');
-            a.href = url; a.download = btn.dataset.name; a.click();
-            URL.revokeObjectURL(url);
-            log(`Downloaded: ${btn.dataset.name}`, 'success');
+            await download(f.id, f.name);
+            log(`Downloaded: ${f.name}`, 'success');
           } catch (err) {
             log(`Download failed: ${err.message}`, 'error');
           } finally {
@@ -154,6 +184,7 @@
             btn.textContent = 'Download';
           }
         });
+        list.appendChild(item);
       });
     }
 
@@ -168,7 +199,6 @@
       }
     }
 
-    // Drop zone
     const dz = $('drop-zone');
     dz.addEventListener('click', () => $('file-input').click());
     dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
@@ -185,58 +215,93 @@
       $('selected-file').textContent = selectedFiles.map(f => f.name).join(', ');
     });
 
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      $('btn-join').disabled  = false;
+      $('btn-leave').disabled = true;
+      $('btn-send').disabled  = true;
+      $('btn-list').disabled  = true;
+      $('file-list').innerHTML = '<div class="empty-hint">No files shared yet</div>';
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
+    }
+
     $('btn-join').addEventListener('click', async () => {
-      const host  = $('host').value.trim();
+      const host   = $('host').value.trim();
       const roomId = $('room-id').value.trim();
-      const userId = $('user-id').value.trim() || `user-${Date.now()}`;
       const token  = $('token').value.trim();
       const pnPub  = $('pn-pub').value.trim();
       const pnSub  = $('pn-sub').value.trim();
+      myUserId     = $('user-id').value.trim() || `user-${Date.now()}`;
 
-      if (!host)            { log('Host is required', 'error'); return; }
-      if (!pnPub || !pnSub) { log('PubNub keys required for file transfer', 'error'); return; }
+      if (!host) { log('Host is required', 'error'); return; }
+      if (!token && (!pnPub || !pnSub)) { log('Enter a token with PubNub credentials, or both PubNub keys', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
-
+        // When a token is passed, the SDK reads pubnubPublishKey, pubnubSubscribeKey and
+        // pubnubToken from it and ignores these two config values.
         client = new ConferenceClient({
           host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
           pubnubPublishKey:   pnPub,
           pubnubSubscribeKey: pnSub
         });
+        watchJoinFailures(handleJoinFailure);
 
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, async () => {
+        // PubNub connects only after the join succeeds.
+        client.on(ConferenceEvents.USER_PUBLISHED, async () => {
           log('Joined — file transfer ready', 'success');
-          $('btn-join').disabled  = true;
           $('btn-leave').disabled = false;
           $('btn-send').disabled  = false;
           $('btn-list').disabled  = false;
           await refreshFileList();
         });
 
+        // Others announce uploads with sendMessageWithFiles(); refresh when one arrives.
+        client.on(ConferenceEvents.CHAT_MESSAGE, ({ messageEvent }) => {
+          if (!messageEvent || messageEvent.publisher === myUserId) return;
+          const files = messageEvent.message?.files;
+          if (files?.length) {
+            log(`${messageEvent.message.name || messageEvent.publisher} shared ${files.map(f => f.name).join(', ')}`);
+            refreshFileList();
+          }
+        });
+
+        const localStream = await startLocalMedia();
         log('Joining room…');
-        await client.join(roomId, userId, token, 'publisher', localStream, false, true);
+        // videoEnabled = false: the SDK publishes a placeholder video track with your audio.
+        await client.join(roomId, myUserId, token, 'publisher', localStream, false, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-send').addEventListener('click', async () => {
       if (!client || selectedFiles.length === 0) {
-        log('Select at least one file first', 'warn');
+        log('Select at least one file first', 'error');
         return;
       }
       $('btn-send').disabled = true;
       setProgress(0);
       try {
+        const results = [];
         for (let i = 0; i < selectedFiles.length; i++) {
           const file = selectedFiles[i];
           log(`Sending: ${file.name} (${formatBytes(file.size)})…`);
-          setProgress(Math.round(((i) / selectedFiles.length) * 100));
-          await client.sendFile(file, { sender: $('user-id').value.trim() });
+          setProgress(Math.round((i / selectedFiles.length) * 100));
+          // Uploads to the room's PubNub channel; resolves to { id, name, timetoken }.
+          const result = await client.sendFile(file);
+          if (!result) throw new Error('PubNub is not connected (check your token or keys)');
+          results.push(result);
           log(`Sent: ${file.name}`, 'success');
         }
+        // Tell the room about the uploads; arrives as CHAT_MESSAGE with message.files.
+        client.sendMessageWithFiles('', myUserId, results);
         setProgress(100);
         selectedFiles = [];
         $('file-input').value = '';
@@ -256,13 +321,9 @@
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        client = null; localStream = null;
-        $('btn-join').disabled  = false;
-        $('btn-leave').disabled = true;
-        $('btn-send').disabled  = true;
-        $('btn-list').disabled  = true;
-        $('file-list').innerHTML = '<div class="empty-hint">No files shared yet</div>';
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

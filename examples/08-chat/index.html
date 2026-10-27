@@ -50,15 +50,13 @@
 </head>
 <body>
   <h1>08 – Chat</h1>
-  <p class="subtitle">Real-time text chat between conference participants via PubNub. Requires PubNub keys.</p>
+  <p class="subtitle">Real-time text chat between conference participants over the conference data channel. No PubNub keys needed.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div><label>User ID / Display Name</label><input id="user-id" placeholder="alice" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
-    <div><label>PubNub Publish Key</label><input id="pn-pub" placeholder="pub-c-…" /></div>
-    <div><label>PubNub Subscribe Key</label><input id="pn-sub" placeholder="sub-c-…" /></div>
+    <div><label>Token</label><input id="token" /></div>
   </div>
 
   <div class="row">
@@ -67,7 +65,8 @@
   </div>
 
   <div class="layout">
-    <video id="local-video" autoplay playsinline muted></video>
+    <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+    <video id="red5pro-publisher" autoplay playsinline muted></video>
 
     <div id="chat-panel">
       <div id="messages">
@@ -82,15 +81,15 @@
 
   <div id="event-log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
-    const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
+    const { ConferenceClient, ConferenceEvents, ChatEventTypes } = red5proConferenceSdk;
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
     let myUserId = '';
 
     function log(msg, type = 'info') {
@@ -101,6 +100,25 @@
       $('event-log').scrollTop = $('event-log').scrollHeight;
     }
 
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure('Join blocked: you are not allowed in this room'));
+    }
+
     function addSystemMsg(text) {
       const el = document.createElement('div');
       el.className = 'system-msg';
@@ -109,12 +127,12 @@
       $('messages').scrollTop = $('messages').scrollHeight;
     }
 
-    function addMessage(senderId, text, isMine) {
+    function addMessage(senderId, text, isMine, time = new Date()) {
       const wrap = document.createElement('div');
       wrap.className = `msg ${isMine ? 'mine' : 'theirs'}`;
       const meta = document.createElement('div');
       meta.className = 'meta';
-      meta.textContent = `${senderId} · ${new Date().toLocaleTimeString()}`;
+      meta.textContent = `${senderId} · ${time.toLocaleTimeString()}`;
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
       bubble.textContent = text;
@@ -127,68 +145,87 @@
     function sendMessage() {
       const text = $('msg-input').value.trim();
       if (!text || !client) return;
-      $('msg-input').value = '';
-      addMessage(myUserId, text, true);
+      // Sent over the publisher's data channel; the server relays it to everyone else in the
+      // room. Returns true when sent. The sender does not receive its own message back.
+      if (client.sendChatMessage(text)) {
+        $('msg-input').value = '';
+        addMessage(myUserId, text, true);
+      } else {
+        log('Message not sent: the data channel is not open', 'error');
+      }
+    }
+
+    // CHAT_MESSAGE carries one of two payloads:
+    //  - data-channel chat (sendChatMessage): { senderStreamName, chatMessageText, timestamp }
+    //  - PubNub events (sendEvent):          { messageEvent: { publisher, message: { eventType, ... } } }
+    function handleChatMessage(detail) {
+      if (detail.messageEvent) {
+        const { publisher, message } = detail.messageEvent;
+        if (publisher === myUserId) return;              // PubNub echoes your own events back
+        if (message.eventType === ChatEventTypes.MESSAGE_RECEIVED) {
+          addMessage(message.name || publisher, message.message, false);
+        }
+        return;
+      }
+      addMessage(detail.senderStreamName, detail.chatMessageText, false, new Date(detail.timestamp || Date.now()));
+      log(`Message from ${detail.senderStreamName}`);
+    }
+
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      $('msg-input').disabled = true;
+      $('btn-send').disabled  = true;
+      $('btn-join').disabled  = false;
+      $('btn-leave').disabled = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
     }
 
     $('btn-join').addEventListener('click', async () => {
       const host   = $('host').value.trim();
       const roomId = $('room-id').value.trim();
-      myUserId     = $('user-id').value.trim() || `user-${Date.now()}`;
       const token  = $('token').value.trim();
-      const pnPub  = $('pn-pub').value.trim();
-      const pnSub  = $('pn-sub').value.trim();
+      myUserId     = $('user-id').value.trim() || `user-${Date.now()}`;
 
       if (!host) { log('Host is required', 'error'); return; }
-      if (!pnPub || !pnSub) { log('PubNub keys are required for chat', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-          pubnubPublishKey:   pnPub,
-          pubnubSubscribeKey: pnSub
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
+        client.on(ConferenceEvents.USER_PUBLISHED, () => {
           log('Publishing — chat ready', 'success');
-          $('btn-join').disabled  = true;
           $('btn-leave').disabled = false;
           $('msg-input').disabled = false;
           $('btn-send').disabled  = false;
           addSystemMsg(`You joined as "${myUserId}"`);
         });
 
-        client.addEventListener(ConferenceEvents.CHAT_MESSAGE, e => {
-          const msg = e.detail;
-          if (!msg) return;
-          const sender  = msg.publisher || msg.senderId || msg.uid || 'Unknown';
-          const text    = msg.message   || msg.text     || msg.content || JSON.stringify(msg);
-          const isMine  = sender === myUserId;
-          addMessage(sender, text, isMine);
-          log(`Message from ${sender}`);
+        client.on(ConferenceEvents.CHAT_MESSAGE, handleChatMessage);
+
+        client.on(ConferenceEvents.NEW_PARTICIPANT, ({ participant }) => {
+          addSystemMsg(`${participant.uid} joined the room`);
         });
 
-        client.addEventListener(ConferenceEvents.NEW_PARTICIPANT, e => {
-          addSystemMsg(`${e.detail?.uid || 'Someone'} joined the room`);
+        client.on(ConferenceEvents.PARTICIPANT_DISCONNECTED, ({ participant }) => {
+          addSystemMsg(`${participant.uid} left the room`);
         });
 
-        client.addEventListener(ConferenceEvents.PARTICIPANT_DISCONNECTED, e => {
-          addSystemMsg(`${e.detail?.uid || 'Someone'} left the room`);
-        });
-
+        const localStream = await startLocalMedia();
         log('Joining room…');
         await client.join(roomId, myUserId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-send').addEventListener('click', sendMessage);
-
     $('msg-input').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
@@ -196,13 +233,9 @@
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null;
-        $('msg-input').disabled = true;
-        $('btn-send').disabled  = true;
-        $('btn-join').disabled  = false;
-        $('btn-leave').disabled = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         addSystemMsg('You left the room');
         log('Left room');
       } catch (err) {

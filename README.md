@@ -1,149 +1,94 @@
 # Red5 Pro Conference SDK
 
-The Red5 Pro Conference SDK is a powerful, professional-grade toolkit for building multi-party video conferencing applications on the Red5 Pro platform. It handles room management, media streaming (WHIP/WHEP), WebRTC statistics, and advanced features like virtual backgrounds and local recording.
+The Red5 Pro Conference SDK is a browser toolkit for building multi-party video conferencing applications on Red5 Cloud and Red5 Pro. It handles room membership, publishing and subscribing over WHIP/WHEP, WebRTC statistics, chat and file sharing, screen sharing, virtual backgrounds, noise suppression and local recording.
 
-## Table of Contents
-
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Core API](#core-api)
-- [Events](#events)
-- [Advanced Features](#advanced-features)
-- [Development](#development)
+**Full documentation:** [Conference SDK guide](https://www.red5.net/docs/red5-cloud/development/sdks/conference-sdk/) · [API Reference](https://www.red5.net/docs/red5-cloud/development/sdks/conference-sdk/api-reference/) · [Examples](https://www.red5.net/docs/red5-cloud/development/sdks/conference-sdk/examples/)
 
 ## Installation
-
-Install the SDK via npm:
 
 ```bash
 npm install red5pro-conference-sdk
 ```
 
-## Quick Start
+```javascript
+import { ConferenceClient, ConferenceEvents } from 'red5pro-conference-sdk';
+```
+
+Or with script tags. Load PubNub first; the SDK bundle already includes the Red5 WebRTC SDK.
+
+```html
+<script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
+<script>
+  const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
+</script>
+```
+
+## Required: the local video element
+
+The SDK publishes from, and previews into, a `<video>` element with the exact id **`red5pro-publisher`**. Add it to the page for every role before calling `join()`:
+
+```html
+<video id="red5pro-publisher" autoplay playsinline muted></video>
+```
+
+Without it, publishing fails with a `PUBLISH_FAILED` event and you never join, even though `join()` resolves to `true`. Screen sharing similarly needs `<video id="red5pro-publisher-screenshare" autoplay playsinline muted>`.
+
+Remote participants are not rendered by the SDK: attach the `mediaStream` from `SUBSCRIBE_SUCCESS` to your own `<video>` elements.
+
+## Quick start
+
+You need your deployment's host name (without `https://`) and a conference token for each participant, generated on your server with the Red5 Backend SDK. The token's `uid`, `roomId` and `role` must match the `join()` arguments. Serve the page over HTTPS or from `localhost`.
 
 ```javascript
 import { ConferenceClient, ConferenceEvents } from 'red5pro-conference-sdk';
 
-// 1. Configure the client
-const config = {
-  host: 'your-red5-pro-host',
-  nodeGroup: 'your-node-group',
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  pubnubPublishKey: 'your-pubnub-publish-key',
-  pubnubSubscribeKey: 'your-pubnub-subscribe-key'
-};
+const client = new ConferenceClient({ host: 'userid-000-xxxxxxxxxx.cloud.red5.net' });
 
-const client = new ConferenceClient(config);
-
-// 2. Listen for events
-client.on(ConferenceEvents.USER_PUBLISHED, (event) => {
-  console.log('Successfully published to room:', event.streamName);
+// Joined: subscribe to everyone already in the room (keyed by uid)
+client.on(ConferenceEvents.USER_PUBLISHED, ({ participants }) => {
+  Object.values(participants).forEach(p => client.subscribe(p));
 });
 
-client.on(ConferenceEvents.NEW_PARTICIPANT, (participant) => {
-  console.log('New participant joined:', participant.userId);
-  // Auto-subscribe to the new participant
-  client.subscribe(participant);
+// Someone joined later
+client.on(ConferenceEvents.NEW_PARTICIPANT, ({ participant }) => client.subscribe(participant));
+
+// Remote media is ready: render it yourself
+client.on(ConferenceEvents.SUBSCRIBE_SUCCESS, ({ uid, mediaStream }) => {
+  const video = document.createElement('video');
+  video.id = `remote-${uid}`;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.srcObject = mediaStream;
+  document.body.appendChild(video);
 });
 
-// 3. Join a room
-const joinParams = {
-  roomId: 'my-awesome-room',
-  userId: 'user-' + Math.floor(Math.random() * 1000),
-  token: 'your-auth-token',
-  role: 'publisher',
-  mediaStream: await navigator.mediaDevices.getUserMedia({ video: true, audio: true }),
-  videoEnabled: true,
-  audioEnabled: true
-};
+client.on(ConferenceEvents.PARTICIPANT_DISCONNECTED, ({ participant }) => {
+  document.getElementById(`remote-${participant.uid}`)?.remove();
+});
 
-await client.join(
-  joinParams.roomId,
-  joinParams.userId,
-  joinParams.token,
-  joinParams.role,
-  joinParams.mediaStream,
-  joinParams.videoEnabled,
-  joinParams.audioEnabled
-);
+// join() resolves before the connection exists: failures arrive as events
+client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => console.error('Publish failed:', error));
+client.on(ConferenceEvents.JOIN_FAILED, ({ statusCode }) => console.error('Join rejected:', statusCode));
+client.on(ConferenceEvents.JOIN_BLOCKED, () => console.error('Blocked from this room'));
+
+// Let the SDK own the local stream
+const media = client.mediaStreamManager;
+const cameraStream = await media.getMediaStream(true, true);
+media.setOriginalStream(cameraStream);
+media.setCurrentStream(cameraStream);
+const localStream = media.getCurrentStream();
+document.getElementById('red5pro-publisher').srcObject = localStream;
+
+await client.join('my-room', 'alice', token, 'publisher', localStream, true, true);
+
+// Later
+await client.leave();
+client.cleanupChat();
 ```
 
-## Configuration
+`client.on(event, handler)` passes the event payload directly. `client.addEventListener(event, handler)` passes a `CustomEvent`, with the payload in `event.detail`.
 
-The `ConferenceConfig` object supports the following parameters:
+## Examples
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `host` | `string` | Red5 Pro Server host address. |
-| `nodeGroup` | `string` | Optional node group for autoscaling. |
-| `iceServers` | `RTCIceServer[]` | Array of ICE servers for WebRTC. |
-| `reconnectionEnabled` | `boolean` | Enable automatic reconnection. Default: `true`. |
-| `maxVideoBitrateKbps` | `number` | Maximum video bitrate for publishing. |
-| `pubnubPublishKey` | `string` | PubNub Publish Key for chat/signaling. |
-| `pubnubSubscribeKey` | `string` | PubNub Subscribe Key for chat/signaling. |
-
-## Core API
-
-### Room Management
-- `join(roomId, userId, token, role, mediaStream, ...)`: Join a conference room.
-- `leave()`: Disconnect and leave the room.
-
-### Media Controls
-- `muteVideo()` / `unmuteVideo()`: Control local camera.
-- `muteAudio()` / `unmuteAudio()`: Control local microphone.
-- `switchVideoDeviceWithTrackReplacement(deviceId)`: Seamlessly switch cameras.
-
-### Publishing & Subscribing
-- `subscribe(user)`: Start viewing a participant's stream.
-- `unsubscribe(userId)`: Stop viewing a participant's stream.
-
-## Events
-
-The SDK uses `ConferenceEvents` for all notifications.
-
-```javascript
-import { ConferenceEvents } from 'red5pro-conference-sdk';
-
-client.on(ConferenceEvents.ROOM_STATE_UPDATE, (state) => {
-  console.log('Room users updated:', state.users);
-});
-
-client.on(ConferenceEvents.CHAT_MESSAGE, (message) => {
-  console.log('New message:', message.text);
-});
-
-client.on(ConferenceEvents.ISSUES_DETECTED, (issues) => {
-  console.warn('Network or WebRTC issues:', issues);
-});
-```
-
-## Advanced Features
-
-### Virtual Backgrounds
-Requires `@mediapipe/selfie_segmentation`.
-
-```javascript
-await client.initializeVirtualBackground();
-await client.enableVirtualBackground('blur', { blurAmount: 10 });
-// Types: 'none', 'blur', 'slight-blur', 'image', 'color'
-```
-
-### Screen Sharing
-```javascript
-await client.startScreenShare({
-  includeAudio: true,
-  metaData: { type: 'presentation' }
-});
-await client.stopScreenShare();
-```
-
-### Local Recording
-Records participant streams directly in the browser and creates a ZIP file.
-
-```javascript
-// Enable local recording
-const zip = await client.generateLocalRecordingZip();
-// Download the recording
-await client.downloadLocalRecording('my-conference-record');
-```
+The [`examples`](./examples) folder has one runnable page per feature: basic join, mute controls, screen share, local recording, virtual background, network stats, device switch, chat, guest management and file transfer. Serve the folder with any static server (for example `npx serve examples`) and open an example from `localhost`.

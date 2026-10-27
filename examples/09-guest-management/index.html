@@ -50,17 +50,18 @@
   <p class="subtitle">Host view: approve or reject guests waiting to join the conference room.</p>
 
   <div class="config">
-    <div><label>Host</label><input id="host" placeholder="your-server.red5.net" /></div>
+    <div><label>Host</label><input id="host" placeholder="your-deployment.cloud.red5.net" /></div>
     <div><label>Room ID</label><input id="room-id" value="testroom" /></div>
     <div>
       <label>Your Role</label>
       <select id="role">
+        <option value="admin">Admin (Host)</option>
         <option value="publisher">Publisher (Host)</option>
         <option value="guest">Guest</option>
       </select>
     </div>
     <div><label>User ID</label><input id="user-id" placeholder="host" /></div>
-    <div><label>Token (optional)</label><input id="token" /></div>
+    <div><label>Token</label><input id="token" /></div>
   </div>
 
   <div class="row">
@@ -69,7 +70,8 @@
   </div>
 
   <div class="layout">
-    <video id="local-video" autoplay playsinline muted></video>
+    <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+    <video id="red5pro-publisher" autoplay playsinline muted></video>
 
     <div class="panel">
       <h3>Waiting Room <span class="badge-count" id="waiting-count" style="display:none">0</span></h3>
@@ -88,15 +90,16 @@
 
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
-    const $ = id => document.getElementById(id);
 
+    const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
+    let myRole = '';
     const waitingGuests = new Map();
     const participants  = new Map();
 
@@ -106,6 +109,28 @@
       el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       $('log').appendChild(el);
       $('log').scrollTop = $('log').scrollHeight;
+    }
+
+    async function startLocalMedia() {
+      const media = client.mediaStreamManager;
+      const cameraStream = await media.getMediaStream(true, true);
+      media.setOriginalStream(cameraStream);
+      media.setCurrentStream(cameraStream);
+      const localStream = media.getCurrentStream();
+      $('red5pro-publisher').srcObject = localStream;
+      return localStream;
+    }
+
+    // join() resolves before the connection is made, so failures arrive as events.
+    function watchJoinFailures(onFailure) {
+      client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => onFailure(`Publish failed: ${error}`));
+      client.on(ConferenceEvents.CONNECT_FAIL,   () => onFailure('Could not connect to the server'));
+      client.on(ConferenceEvents.PUBLISH_FAIL,   () => onFailure('The server rejected the stream'));
+      client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => onFailure(`Join failed: ${error || `status ${statusCode}`}`));
+      // For a guest, JOIN_BLOCKED means the host rejected the request.
+      client.on(ConferenceEvents.JOIN_BLOCKED,   () => onFailure(myRole === 'guest'
+        ? 'The host rejected your join request'
+        : 'Join blocked: you are not allowed in this room'));
     }
 
     function renderWaiting() {
@@ -119,45 +144,30 @@
       badge.style.display = '';
       badge.textContent = waitingGuests.size;
       list.innerHTML = '';
-      waitingGuests.forEach((user, uid) => {
+      waitingGuests.forEach((guest, uid) => {
         const card = document.createElement('div');
         card.className = 'user-card';
         card.innerHTML = `
-          <div><div class="name">${uid}</div><div class="role">Guest</div></div>
+          <div><div class="name"></div><div class="role">Guest</div></div>
           <div class="card-actions">
-            <button class="approve-btn" data-uid="${uid}">Approve</button>
-            <button class="reject-btn"  data-uid="${uid}">Reject</button>
+            <button class="approve-btn">Approve</button>
+            <button class="reject-btn">Reject</button>
           </div>`;
+        card.querySelector('.name').textContent = uid;
+        card.querySelector('.approve-btn').addEventListener('click', () => decide(uid, true));
+        card.querySelector('.reject-btn').addEventListener('click', () => decide(uid, false));
         list.appendChild(card);
       });
+    }
 
-      list.querySelectorAll('.approve-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const uid = btn.dataset.uid;
-          try {
-            await client.approveGuest(uid);
-            waitingGuests.delete(uid);
-            renderWaiting();
-            log(`Approved guest: ${uid}`, 'success');
-          } catch (err) {
-            log(`Approve failed: ${err.message}`, 'error');
-          }
-        });
-      });
-
-      list.querySelectorAll('.reject-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const uid = btn.dataset.uid;
-          try {
-            await client.rejectGuest(uid);
-            waitingGuests.delete(uid);
-            renderWaiting();
-            log(`Rejected guest: ${uid}`, 'warn');
-          } catch (err) {
-            log(`Reject failed: ${err.message}`, 'error');
-          }
-        });
-      });
+    function decide(uid, approve) {
+      // Sends the decision over the data channel. An approved guest then appears
+      // through NEW_PARTICIPANT like anyone else.
+      if (approve) client.approveGuest(uid);
+      else         client.rejectGuest(uid);
+      waitingGuests.delete(uid);
+      renderWaiting();
+      log(`${approve ? 'Approved' : 'Rejected'} guest: ${uid}`, approve ? 'success' : 'info');
     }
 
     function renderParticipants() {
@@ -170,85 +180,90 @@
       participants.forEach((user, uid) => {
         const card = document.createElement('div');
         card.className = 'user-card';
-        card.innerHTML = `<div><div class="name">${uid}</div><div class="role">${user.role || 'publisher'}</div></div>`;
+        card.innerHTML = '<div><div class="name"></div><div class="role"></div></div>';
+        card.querySelector('.name').textContent = uid;
+        card.querySelector('.role').textContent = user.role || 'publisher';
         list.appendChild(card);
       });
+    }
+
+    function resetUi() {
+      $('red5pro-publisher').srcObject = null;
+      waitingGuests.clear(); participants.clear();
+      renderWaiting(); renderParticipants();
+      $('btn-join').disabled  = false;
+      $('btn-leave').disabled = true;
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
     }
 
     $('btn-join').addEventListener('click', async () => {
       const host   = $('host').value.trim();
       const roomId = $('room-id').value.trim();
       const userId = $('user-id').value.trim() || `user-${Date.now()}`;
-      const role   = $('role').value;
       const token  = $('token').value.trim();
+      myRole       = $('role').value;
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        $('local-video').srcObject = localStream;
+        client = new ConferenceClient({ host });
+        watchJoinFailures(handleJoinFailure);
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
-          log(`Joined as ${role}`, 'success');
-          $('btn-join').disabled  = true;
+        // For a guest this only fires after a host approves the request.
+        // `participants` and `guestsWaitingApproval` are objects keyed by uid.
+        client.on(ConferenceEvents.USER_PUBLISHED, ({ participants: others, guestsWaitingApproval }) => {
+          log(`Joined as ${myRole}`, 'success');
           $('btn-leave').disabled = false;
+          Object.values(others).forEach(user => participants.set(user.uid, user));
+          Object.values(guestsWaitingApproval || {}).forEach(guest => waitingGuests.set(guest.uid, guest));
+          renderParticipants();
+          renderWaiting();
         });
 
-        client.addEventListener(ConferenceEvents.GUEST_JOIN_REQUEST, e => {
-          const user = e.detail;
-          log(`Guest join request from: ${user?.uid}`, 'warn');
-          waitingGuests.set(user.uid, user);
+        // Delivered to hosts in the room: { streamName, ... }
+        client.on(ConferenceEvents.GUEST_JOIN_REQUEST, request => {
+          log(`Guest join request from: ${request.streamName}`);
+          waitingGuests.set(request.streamName, request);
           renderWaiting();
         });
 
-        client.addEventListener(ConferenceEvents.NEW_PARTICIPANT, e => {
-          const user = e.detail;
-          participants.set(user.uid, user);
-          renderParticipants();
-          log(`Participant joined: ${user.uid}`);
-        });
-
-        client.addEventListener(ConferenceEvents.PARTICIPANT_DISCONNECTED, e => {
-          const user = e.detail;
-          participants.delete(user.uid);
-          waitingGuests.delete(user.uid);
+        client.on(ConferenceEvents.NEW_PARTICIPANT, ({ participant }) => {
+          participants.set(participant.uid, participant);
+          waitingGuests.delete(participant.uid);
           renderParticipants();
           renderWaiting();
-          log(`Participant left: ${user.uid}`);
+          log(`Participant joined: ${participant.uid}`);
         });
 
-        client.addEventListener(ConferenceEvents.ROOM_STATE_UPDATE, e => {
-          const state = e.detail;
-          if (state?.users) {
-            state.users.forEach(u => {
-              if (u.uid !== userId) participants.set(u.uid, u);
-            });
-            renderParticipants();
-          }
+        client.on(ConferenceEvents.PARTICIPANT_DISCONNECTED, ({ participant }) => {
+          participants.delete(participant.uid);
+          renderParticipants();
+          log(`Participant left: ${participant.uid}`);
         });
 
-        log(`Joining as ${role}…`);
-        await client.join(roomId, userId, token, role, localStream, true, true);
+        const localStream = await startLocalMedia();
+        log(myRole === 'guest' ? 'Requesting to join — waiting for a host to approve…' : `Joining as ${myRole}…`);
+        await client.join(roomId, userId, token, myRole, localStream, true, true);
+        // Let a waiting guest cancel the request.
+        if (myRole === 'guest') $('btn-leave').disabled = false;
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-leave').addEventListener('click', async () => {
       try {
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('local-video').srcObject = null;
-        client = null; localStream = null;
-        waitingGuests.clear(); participants.clear();
-        renderWaiting(); renderParticipants();
-        $('btn-join').disabled  = false;
-        $('btn-leave').disabled = true;
+        client.cleanupChat(); // leave() does not close the PubNub subscription
+        client = null;
+        resetUi();
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');

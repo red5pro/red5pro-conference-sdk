@@ -37,12 +37,12 @@
 </head>
 <body>
   <h1>01 – Basic Join</h1>
-  <p class="subtitle">Join a room, publish camera + mic, auto-subscribe to other participants, then leave.</p>
+  <p class="subtitle">Join a room, publish camera + mic, subscribe to everyone else in the room, then leave.</p>
 
   <div class="config">
     <div>
       <label>Host</label>
-      <input id="host" placeholder="your-server.red5.net" />
+      <input id="host" placeholder="your-deployment.cloud.red5.net" />
     </div>
     <div>
       <label>Room ID</label>
@@ -53,8 +53,8 @@
       <input id="user-id" placeholder="alice" />
     </div>
     <div>
-      <label>Token (optional)</label>
-      <input id="token" placeholder="JWT token" />
+      <label>Token</label>
+      <input id="token" placeholder="Conference token (JWT) for this user, room and role" />
     </div>
   </div>
 
@@ -65,18 +65,24 @@
 
   <p id="status">Not connected</p>
 
-  <div id="video-grid"></div>
+  <div id="video-grid">
+    <div class="video-tile">
+      <!-- REQUIRED: the SDK publishes from and previews into the element with id="red5pro-publisher". -->
+      <video id="red5pro-publisher" autoplay playsinline muted></video>
+      <div class="label">You</div>
+    </div>
+  </div>
   <div id="log"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-webrtc-sdk@latest/red5pro-sdk.min.js"></script>
-  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.8.5.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@latest/red5pro-conference-sdk.min.js"></script>
+  <!-- PubNub first: the Conference SDK expects a global `PubNub` (used for chat and file transfer). -->
+  <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.10.2.5.min.js"></script>
+  <!-- The Conference SDK bundle already includes the Red5 WebRTC SDK; no separate script is needed. -->
+  <script src="https://cdn.jsdelivr.net/npm/red5pro-conference-sdk@1/red5pro-conference-sdk.min.js"></script>
   <script>
     const { ConferenceClient, ConferenceEvents } = red5proConferenceSdk;
 
     const $ = id => document.getElementById(id);
     let client = null;
-    let localStream = null;
 
     function log(msg, type = 'info') {
       const el = document.createElement('div');
@@ -91,26 +97,51 @@
       $('status').className = cls;
     }
 
-    function addVideoTile(id, stream, label) {
-      const tile = document.createElement('div');
-      tile.className = 'video-tile';
-      tile.id = `tile-${id}`;
-      const video = document.createElement('video');
-      video.autoplay = true;
-      video.playsInline = true;
-      if (label === 'You') video.muted = true;
-      video.srcObject = stream;
-      const lbl = document.createElement('div');
-      lbl.className = 'label';
-      lbl.textContent = label;
-      tile.appendChild(video);
-      tile.appendChild(lbl);
-      $('video-grid').appendChild(tile);
+    // Remote participants: the SDK does not render them. Attach each MediaStream yourself.
+    function addRemoteTile(uid, stream) {
+      let tile = $(`tile-${uid}`);
+      if (!tile) {
+        tile = document.createElement('div');
+        tile.className = 'video-tile';
+        tile.id = `tile-${uid}`;
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = uid;
+        tile.append(video, label);
+        $('video-grid').appendChild(tile);
+      }
+      tile.querySelector('video').srcObject = stream;
     }
 
-    function removeVideoTile(id) {
-      const tile = $(`tile-${id}`);
-      if (tile) tile.remove();
+    function removeRemoteTile(uid) {
+      $(`tile-${uid}`)?.remove();
+    }
+
+    function resetUi() {
+      document.querySelectorAll('[id^="tile-"]').forEach(tile => tile.remove());
+      $('red5pro-publisher').srcObject = null;
+      $('btn-join').disabled = false;
+      $('btn-leave').disabled = true;
+    }
+
+    async function subscribeTo(participant) {
+      try {
+        // Resolves before media arrives; the stream is delivered by SUBSCRIBE_SUCCESS.
+        await client.subscribe(participant);
+      } catch (err) {
+        log(`Subscribe to ${participant.uid} failed: ${err.message}`, 'error');
+      }
+    }
+
+    async function handleJoinFailure(message) {
+      log(message, 'error');
+      setStatus('Join failed', 'error');
+      await client?.mediaStreamManager.cleanupMediaStreams();
+      client = null;
+      resetUi();
     }
 
     $('btn-join').addEventListener('click', async () => {
@@ -120,69 +151,74 @@
       const token  = $('token').value.trim();
 
       if (!host) { log('Host is required', 'error'); return; }
+      $('btn-join').disabled = true;
 
       try {
-        log('Requesting camera + microphone…');
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        addVideoTile('local', localStream, 'You');
+        client = new ConferenceClient({ host });
 
-        client = new ConferenceClient({
-          host,
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-
-        client.addEventListener(ConferenceEvents.USER_PUBLISHED, () => {
-          log('Local stream published', 'success');
+        // Joined. `participants` holds everyone who was already in the room (keyed by uid).
+        client.on(ConferenceEvents.USER_PUBLISHED, ({ participants }) => {
+          log(`Joined room "${roomId}" as ${userId}`, 'success');
           setStatus('Connected – publishing', 'connected');
-          $('btn-join').disabled = true;
           $('btn-leave').disabled = false;
+          Object.values(participants).forEach(subscribeTo);
         });
 
-        client.addEventListener(ConferenceEvents.NEW_PARTICIPANT, async e => {
-          const user = e.detail;
-          log(`New participant: ${user.uid}`);
-          try {
-            const info = await client.subscribe(user);
-            if (info?.mediaStream) addVideoTile(user.uid, info.mediaStream, user.uid);
-          } catch (err) {
-            log(`Subscribe failed for ${user.uid}: ${err.message}`, 'error');
-          }
+        // Someone joined after us.
+        client.on(ConferenceEvents.NEW_PARTICIPANT, ({ participant }) => {
+          log(`New participant: ${participant.uid}`);
+          subscribeTo(participant);
         });
 
-        client.addEventListener(ConferenceEvents.PARTICIPANT_DISCONNECTED, e => {
-          const user = e.detail;
-          log(`Participant left: ${user.uid}`);
-          removeVideoTile(user.uid);
+        // Remote media is ready to render.
+        client.on(ConferenceEvents.SUBSCRIBE_SUCCESS, ({ uid, mediaStream }) => {
+          log(`Receiving ${uid}`, 'success');
+          addRemoteTile(uid, mediaStream);
         });
 
-        client.addEventListener(ConferenceEvents.SUBSCRIBE_SUCCESS, e => {
-          log(`Subscribed to ${e.detail?.user?.uid || 'participant'}`, 'success');
+        client.on(ConferenceEvents.SUBSCRIBE_FAILED, ({ user, error }) => {
+          log(`Subscribe failed for ${user?.uid}: ${error?.type || error}`, 'error');
         });
 
-        client.addEventListener(ConferenceEvents.JOIN_FAILED, e => {
-          log(`Join failed: ${e.detail?.message || 'unknown error'}`, 'error');
-          setStatus('Join failed', 'error');
+        // The SDK unsubscribes automatically; only the UI needs cleaning up.
+        client.on(ConferenceEvents.PARTICIPANT_DISCONNECTED, ({ participant }) => {
+          log(`Participant left: ${participant.uid}`);
+          removeRemoteTile(participant.uid);
         });
+
+        // join() resolves before the connection is made, so failures arrive as events.
+        client.on(ConferenceEvents.PUBLISH_FAILED, ({ error }) => handleJoinFailure(`Publish failed: ${error}`));
+        client.on(ConferenceEvents.CONNECT_FAIL,   () => handleJoinFailure('Could not connect to the server'));
+        client.on(ConferenceEvents.PUBLISH_FAIL,   () => handleJoinFailure('The server rejected the stream'));
+        client.on(ConferenceEvents.JOIN_FAILED,    ({ statusCode, error }) => handleJoinFailure(`Join failed: ${error || `status ${statusCode}`} (check the token's uid, roomId and role)`));
+        client.on(ConferenceEvents.JOIN_BLOCKED,   () => handleJoinFailure('Join blocked: you are not allowed in this room'));
+
+        // Let the SDK own the local stream so mute, device switching, noise suppression
+        // and recording all act on the same tracks.
+        log('Requesting camera + microphone…');
+        const media = client.mediaStreamManager;
+        const cameraStream = await media.getMediaStream(true, true);
+        media.setOriginalStream(cameraStream);
+        media.setCurrentStream(cameraStream);
+        const localStream = media.getCurrentStream();
+        $('red5pro-publisher').srcObject = localStream;
 
         setStatus('Joining…');
         log('Joining room…');
         await client.join(roomId, userId, token, 'publisher', localStream, true, true);
       } catch (err) {
-        log(`Error: ${err.message}`, 'error');
-        setStatus('Error', 'error');
+        await handleJoinFailure(`Error: ${err.message}`);
       }
     });
 
     $('btn-leave').addEventListener('click', async () => {
       try {
+        // Stops publishing, unsubscribes everyone and releases the camera and microphone.
         await client.leave();
-        localStream?.getTracks().forEach(t => t.stop());
-        $('video-grid').innerHTML = '';
+        client.cleanupChat(); // leave() does not close the PubNub subscription
         client = null;
-        localStream = null;
+        resetUi();
         setStatus('Not connected');
-        $('btn-join').disabled = false;
-        $('btn-leave').disabled = true;
         log('Left room');
       } catch (err) {
         log(`Leave error: ${err.message}`, 'error');
